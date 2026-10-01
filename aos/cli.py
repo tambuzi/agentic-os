@@ -200,20 +200,27 @@ def cmd_feature(a) -> int:
     elif a.action == "approve":
         new = None
         if a.edit:
-            p = next((x for x in board.proposals(status="pending") if x["id"] == int(a.id)), None)
+            p = next((x for x in board.proposals(status="pending") if x["id"] == a.id), None)
             if not p:
                 raise AosError(f"no pending proposal #{a.id}")
-            current = board.contract(p["feature"])["text"].rstrip()
-            draft = f"{current}\n\n## Change (proposal #{p['id']})\n\n{p['body']}\n"
+            contract = board.contract(p["feature"])
+            draft = (f"{contract['text'].rstrip()}\n\n## Change v{contract['version'] + 1} "
+                     f"(proposal #{p['id']})\n\n{p['body']}\n")
             tmp = board.data / f".proposal-{a.id}.md"
             tmp.write_text(draft)
-            subprocess.call([os.environ.get("EDITOR", "vi"), str(tmp)])
-            new = tmp.read_text()
-            tmp.unlink()
-        r = board.approve(int(a.id), new_contract=new)
+            try:
+                code = subprocess.call([*shlex.split(os.environ.get("EDITOR") or "vi"), str(tmp)])
+                new = tmp.read_text()
+            finally:
+                tmp.unlink(missing_ok=True)
+            if code != 0:
+                raise AosError(f"editor exited with code {code}; proposal not approved")
+            if not new.strip():
+                raise AosError("edited contract is empty; proposal not approved")
+        r = board.approve(a.id, new_contract=new)
         print(f"approved #{a.id}: contract is now v{r['contract_version']}")
     elif a.action == "reject":
-        board.reject(int(a.id), a.reason or "")
+        board.reject(a.id, a.reason or "")
         print(f"rejected #{a.id}")
     else:
         board.set_feature_status(a.slug, "done" if a.action == "done" else "cancelled")
@@ -229,14 +236,14 @@ def cmd_task(a) -> int:
         profile = resolve_profile(aos, a.project, a.worker)
         attempts = profile_settings(aos, profile, a.project)["max_attempts"]
         spec = Path(a.spec_file).read_text() if a.spec_file else ""
-        deps = [int(x) for x in (a.after or "").split(",") if x.strip()]
+        deps = a.after or []
         tid = board.add_task(a.feature, a.project, a.title, spec, deps, worker=profile, max_attempts=attempts)
         print(f"task #{tid} added ({a.project}, worker {profile})")
     elif a.action == "list":
         for t in board.tasks(feature=a.feature, status=a.status):
             print(f"#{t['id']:<4} {t['feature']:<18} {t['project']:<14} {t['status']:<10} {t['worker']:<7} {t['title']}")
     elif a.action == "show":
-        t = board.task(int(a.id))
+        t = board.task(a.id)
         print(yaml.safe_dump({k: t[k] for k in ("id", "feature", "project", "title", "status", "worker",
                                                  "attempts", "max_attempts", "depends_on", "result", "note")},
                              sort_keys=False, allow_unicode=True), end="")
@@ -250,13 +257,13 @@ def cmd_task(a) -> int:
             else:
                 print("(no log yet)")
     elif a.action == "retry":
-        board.retry(int(a.id), note=a.note, worker=a.worker, resume=a.resume)
+        board.retry(a.id, note=a.note, worker=a.worker, resume=a.resume)
         print(f"task #{a.id} queued again")
     elif a.action == "cancel":
-        board.cancel(int(a.id))
+        board.cancel(a.id)
         print(f"task #{a.id} cancelled")
     else:
-        board.unblock(int(a.id), a.note or "")
+        board.unblock(a.id, a.note or "")
         print(f"task #{a.id} unblocked")
     return 0
 
@@ -285,6 +292,20 @@ def cmd_board(a) -> int:
         for p in board.proposals(f["slug"], "pending"):
             print(f"  proposal #{p['id']} pending: {p['reason']}  (aos feature approve|reject {p['id']})")
     return 0
+
+
+def _positive_int(value: str) -> int:
+    n = int(value)
+    if n < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return n
+
+
+def _id_list(value: str) -> list[int]:
+    try:
+        return [int(x) for x in value.split(",") if x.strip()]
+    except ValueError:
+        raise argparse.ArgumentTypeError("comma-separated task ids, e.g. 1,2")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -336,10 +357,10 @@ def _parser() -> argparse.ArgumentParser:
     for name in ("show", "done", "cancel"):
         fsub.add_parser(name).add_argument("slug")
     f = fsub.add_parser("approve")
-    f.add_argument("id")
+    f.add_argument("id", type=int)
     f.add_argument("--edit", action="store_true", help="edit the new contract in $EDITOR")
     f = fsub.add_parser("reject")
-    f.add_argument("id")
+    f.add_argument("id", type=int)
     f.add_argument("--reason")
     s.set_defaults(fn=cmd_feature)
 
@@ -350,29 +371,29 @@ def _parser() -> argparse.ArgumentParser:
     t.add_argument("project")
     t.add_argument("title")
     t.add_argument("--spec-file")
-    t.add_argument("--after", help="comma-separated task ids this task waits for")
+    t.add_argument("--after", type=_id_list, help="comma-separated task ids this task waits for")
     t.add_argument("--worker", choices=None, help="worker profile (claude, kiro, ...)")
     t = tsub.add_parser("list")
     t.add_argument("--feature")
     t.add_argument("--status")
     t = tsub.add_parser("show")
-    t.add_argument("id")
+    t.add_argument("id", type=int)
     t.add_argument("--log", action="store_true")
     t = tsub.add_parser("retry")
-    t.add_argument("id")
+    t.add_argument("id", type=int)
     t.add_argument("--resume", action="store_true")
     t.add_argument("--note")
     t.add_argument("--worker")
-    tsub.add_parser("cancel").add_argument("id")
+    tsub.add_parser("cancel").add_argument("id", type=int)
     t = tsub.add_parser("unblock")
-    t.add_argument("id")
+    t.add_argument("id", type=int)
     t.add_argument("--note")
     s.set_defaults(fn=cmd_task)
 
     s = sub.add_parser("board", help="board status, or `board run` to dispatch workers")
     s.add_argument("action", nargs="?", choices=["run"])
     s.add_argument("--feature")
-    s.add_argument("--parallel", type=int)
+    s.add_argument("--parallel", type=_positive_int)
     s.add_argument("--once", action="store_true")
     s.set_defaults(fn=cmd_board)
     sub.add_parser("status", help="uncommitted agenticOS changes").set_defaults(fn=cmd_status)

@@ -92,11 +92,14 @@ class Dispatcher:
         board_cfg = self.aos.settings["board"]
         self.board = Board(self.aos.data, board_cfg["max_tasks_per_feature"])
         self.feature = feature
-        self.parallel = int(parallel or board_cfg["parallel"])
+        self.parallel = int(parallel if parallel is not None else board_cfg["parallel"])
+        if self.parallel < 1:
+            raise AosError("parallel must be at least 1")
         self.tick_s = tick
         self.grace_s = 30.0
         self.running: dict[int, Running] = {}
         self.stopping = False
+        self.once = False
         self.aos_bin = shutil.which("aos") or "aos"
         self._last_stuck: dict | None = None
 
@@ -124,23 +127,38 @@ class Dispatcher:
             pid = t["pid"]
             if pid and t.get("proc_start") and process_start(pid) == t["proc_start"]:
                 _kill_group(pid)
+            self._remove_kiro_agent(t)
             try:
                 self.board.attempt_failed(t["id"], "dispatcher restarted; previous worker abandoned")
             except TASK_ERRORS as e:
                 _warn(f"recover task #{t['id']}: {e}")
 
+    def _remove_kiro_agent(self, t: dict) -> None:
+        """A crashed dispatcher never ran cleanup: drop the task's per-run Kiro agent file."""
+        from .workers import kiro
+        from .workers.common import profile_settings
+        try:
+            aos = AOS(self.aos.repo, home=self.aos.home, slug=t["project"], data=self.aos.data)
+            settings = profile_settings(aos, t["worker"], t["project"])
+        except AosError:
+            return
+        if settings.get("adapter") == "kiro":
+            (kiro.agents_dir(settings) / f"{kiro.agent_name(t)}.json").unlink(missing_ok=True)
+
     def run(self, once: bool = False) -> None:
+        self.once = once
         with self._lock():
-            self.recover()
-            self.tick()
-            if once:
-                while self.running:
-                    time.sleep(self.tick_s)
-                    self._reap()
-                self.board.promote()
-                return
+            # handler first, so Ctrl-C at any point stops our workers instead of orphaning them
             previous = signal.signal(signal.SIGINT, self._on_sigint)
             try:
+                self.recover()
+                self.tick()
+                if once:
+                    while self.running:
+                        time.sleep(self.tick_s)
+                        self._reap()
+                    self.board.promote()
+                    return
                 while not (self.stopping and not self.running):
                     time.sleep(self.tick_s)
                     self.tick()
@@ -148,7 +166,8 @@ class Dispatcher:
                 signal.signal(signal.SIGINT, previous)
 
     def _on_sigint(self, *_):
-        if self.stopping:
+        """--once: stop the workers now. Loop mode: first Ctrl-C stops launching, second stops workers."""
+        if self.once or self.stopping:
             for r in list(self.running.values()):
                 self._terminate(r)
         self.stopping = True

@@ -11,6 +11,19 @@ from .common import Launch, RunSpec, write_mcp_config
 
 EXIT_REASONS: dict[int, str] = {}
 
+# One argv element is capped at 128 KiB on Linux (MAX_ARG_STRLEN); stay well below it.
+MAX_CONTEXT_BYTES = 100_000
+TRUNCATED = ("\n…[aos: worker context truncated; call task_show and board_read for the full "
+             "brief, contract, task spec and timeline]\n")
+
+
+def _capped(text: str) -> str:
+    raw = text.encode("utf-8")
+    if len(raw) <= MAX_CONTEXT_BYTES:
+        return text
+    room = MAX_CONTEXT_BYTES - len(TRUNCATED.encode("utf-8"))
+    return raw[:room].decode("utf-8", errors="ignore") + TRUNCATED
+
 
 def translate(allowed: list[str]) -> list[str]:
     out: list[str] = []
@@ -31,7 +44,7 @@ def translate(allowed: list[str]) -> list[str]:
 def prepare(spec: RunSpec, settings: dict) -> Launch:
     mcp = write_mcp_config(spec)
     argv = [settings.get("bin") or "claude", "-p",
-            "--append-system-prompt", read_text(spec.context_file),
+            "--append-system-prompt", _capped(read_text(spec.context_file)),
             "--mcp-config", str(mcp), "--strict-mcp-config",
             "--permission-mode", "acceptEdits"]
     if settings.get("model"):

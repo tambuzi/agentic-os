@@ -105,9 +105,9 @@ def default_slug(path: str | Path) -> str:
     return s or "project"
 
 
-def check_slug(slug: str) -> None:
+def check_slug(slug: str, kind: str = "project") -> None:
     if not SLUG_RE.match(slug or ""):
-        raise AosError(f"invalid project slug {slug!r}", "lowercase a-z, 0-9 and '-', max 64 chars")
+        raise AosError(f"invalid {kind} slug {slug!r}", "lowercase a-z, 0-9 and '-', max 64 chars")
 
 
 def graphskill_cmd(cfg: dict | None = None) -> list[str] | None:

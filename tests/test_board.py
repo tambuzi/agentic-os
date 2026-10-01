@@ -165,3 +165,9 @@ def test_stuck_is_transitive(board):
     c = board.add_task("checkout", "billing", "c", depends_on=[b])
     board.cancel(a)
     assert board.stuck() == {b: [a], c: [b]}
+
+
+def test_feature_slug_error_names_feature(board):
+    with pytest.raises(AosError) as e:
+        board.create_feature("Bad Slug", "x")
+    assert "feature slug" in e.value.message

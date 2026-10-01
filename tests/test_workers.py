@@ -177,3 +177,13 @@ def test_prompt_starting_with_dash_is_not_a_flag(setup, tmp_path):
     assert argv[-2:] == ["--", spec.prompt] and argv.count(spec.prompt) == 1
     k = kiro.prepare(spec, {**profile_settings(aos, "kiro", "shop-api"), "agents_dir": str(tmp_path / "a")})
     assert k.argv[-2:] == ["--", spec.prompt]
+
+
+def test_claude_context_capped_for_argv_limits(setup):
+    aos, board, task, proj, wt = setup
+    spec, settings = prepare_run(aos, board, task, wt, proj, "/bin/aos")
+    spec.context_file.write_text("x" * 300_000)
+    argv = claude.prepare(spec, settings).argv
+    ctx = argv[argv.index("--append-system-prompt") + 1]
+    assert len(ctx.encode()) <= claude.MAX_CONTEXT_BYTES
+    assert "call task_show" in ctx

@@ -272,3 +272,71 @@ def test_terminating_own_child_is_fast():
     start = time.monotonic()
     _kill_group(p.pid, proc=p)
     assert p.poll() is not None and time.monotonic() - start < 1.5
+
+
+@pytest.fixture
+def kiro_env(env, tmp_path, monkeypatch):
+    repo, board, _, home = env
+    agents = tmp_path / "kiro-agents"
+    cfg = yaml.safe_load((repo / "aos.yaml").read_text())
+    cfg["workers"]["fakekiro"] = {"adapter": "kiro", "bin": str(Path(__file__).parent / "fake_kiro.py"),
+                                  "agents_dir": str(agents), "timeout_min": 0.05}
+    (repo / "aos.yaml").write_text(yaml.safe_dump(cfg))
+    monkeypatch.setenv("FAKE_KIRO_AGENTS", str(agents))
+    monkeypatch.setenv("FAKE_KIRO_MARKER", str(tmp_path / "marker"))
+    return repo, board, agents, tmp_path / "marker"
+
+
+def test_kiro_worker_exit_3_and_agent_file_lifecycle(kiro_env):
+    repo, board, agents, marker = kiro_env
+    t = board.add_task("checkout", "api", "k", worker="fakekiro", max_attempts=1)
+    Dispatcher(repo, tick=0.05).run(once=True)
+    assert marker.read_text() == "agent file present"
+    assert board.task(t)["status"] == "failed"
+    assert any("MCP startup failed" in e["body"] for e in board.events("checkout"))
+    assert not list(agents.glob("*.json"))
+
+
+def test_recover_removes_stale_kiro_agent_file(kiro_env):
+    repo, board, agents, _ = kiro_env
+    t = board.add_task("checkout", "api", "k", worker="fakekiro")
+    board.promote()
+    board.claim(t)
+    agents.mkdir(parents=True, exist_ok=True)
+    stale = agents / f"aos-checkout-t{t}.json"
+    stale.write_text("{}")
+    Dispatcher(repo, tick=0.05).recover()
+    assert not stale.exists()
+
+
+def test_ctrl_c_during_once_stops_workers(env, monkeypatch):
+    import os
+    import signal
+    repo, board, _, _ = env
+    monkeypatch.setenv("FAKE_MODE", "sleep")
+    t = add(board, "api", max_attempts=1)
+    proc = subprocess.Popen([sys.executable, "-c",
+                             "from aos.dispatcher import Dispatcher; import sys; "
+                             f"Dispatcher({str(repo)!r}, tick=0.05).run(once=True)"],
+                            env=os.environ.copy())
+    assert wait_for(lambda: board.task(t)["pid"] is not None)
+    worker_pid = board.task(t)["pid"]
+    proc.send_signal(signal.SIGINT)
+    assert proc.wait(timeout=15) == 0
+    assert wait_for(lambda: not _pid_alive(worker_pid), timeout=5)
+    assert board.task(t)["status"] == "failed"
+
+
+def _pid_alive(pid):
+    import os
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def test_parallel_must_be_positive(env):
+    repo, _, _, _ = env
+    with pytest.raises(AosError):
+        Dispatcher(repo, parallel=0)

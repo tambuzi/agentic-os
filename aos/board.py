@@ -116,12 +116,12 @@ class Board:
 
     # -- features ------------------------------------------------------------
     def feature_dir(self, slug: str) -> Path:
-        check_slug(slug)
+        check_slug(slug, "feature")
         return self.data / "features" / slug
 
     def create_feature(self, slug: str, title: str, brief: str = "", contract: str = "",
                        author: str = "human") -> dict:
-        check_slug(slug)
+        check_slug(slug, "feature")
         if not (title or "").strip():
             raise AosError("feature needs a title")
         with self._tx() as c:

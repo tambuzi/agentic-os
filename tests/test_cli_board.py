@@ -92,3 +92,41 @@ def test_doctor_reports_worker_clis(configured, capsys, monkeypatch):
     monkeypatch.setattr("shutil.which", lambda n: None)
     code, out, _ = run(["doctor"], capsys)
     assert "claude" in out and "kiro-cli" in out
+
+
+def test_non_numeric_ids_and_bad_parallel_are_usage_errors(env, capsys):
+    for argv in (["task", "show", "abc"], ["feature", "approve", "x"], ["board", "run", "--parallel", "0"]):
+        with pytest.raises(SystemExit) as e:
+            main(argv)
+        assert e.value.code == 2
+        assert "Traceback" not in capsys.readouterr().err
+
+
+@pytest.fixture
+def editor(tmp_path):
+    """An $EDITOR with arguments: `python3 <script> <mode>`; mode write|fail|empty."""
+    script = tmp_path / "ed.py"
+    script.write_text("import sys, pathlib\nmode, path = sys.argv[1], pathlib.Path(sys.argv[2])\n"
+                      "draft = path.read_text()\n"
+                      "if mode == 'fail': sys.exit(1)\n"
+                      "path.write_text('' if mode == 'empty' else draft.replace('add currency', 'add currency (EUR only)'))\n")
+    return lambda mode: f"{sys.executable} {script} {mode}"
+
+
+def test_approve_edit(env, capsys, monkeypatch, editor):
+    _, board = env
+    run(["feature", "new", "checkout", "--title", "Checkout"], capsys)
+    run(["task", "add", "checkout", "api", "Orders"], capsys)
+    for mode in ("fail", "empty"):
+        p = board.propose(1, "add currency", "r", author="task:1")
+        monkeypatch.setenv("EDITOR", editor(mode))
+        code, _, err = run(["feature", "approve", str(p), "--edit"], capsys)
+        assert code == 1 and "not approved" in err
+        assert board.contract("checkout")["version"] == 1
+        board.reject(p)
+    p = board.propose(1, "add currency", "r", author="task:1")
+    monkeypatch.setenv("EDITOR", editor("write"))
+    assert run(["feature", "approve", str(p), "--edit"], capsys)[0] == 0
+    c = board.contract("checkout")
+    assert c["version"] == 2 and "add currency (EUR only)" in c["text"]
+    assert f"## Change v2 (proposal #{p})" in c["text"]
