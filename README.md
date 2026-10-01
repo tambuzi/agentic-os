@@ -164,10 +164,59 @@ When the agent finishes a non-trivial task, finds its way past a dead end, or ge
 | **Automatic learning loop**: when a session ends, a background review reads the transcript and proposes memory/skill updates to the inbox (hermes-style) | 🔜 sub-project 2 |
 | Search past sessions; prune unused or duplicate skills | 🔜 sub-project 3 |
 | Import from Notion/Confluence into `knowledge/` | 🔜 sub-project 4 |
+| Multi-project features with parallel Claude Code / Kiro workers (board) | ✅ works now |
 
 Until sub-project 2 ships, learning only happens while a session is running. The agent saves things when the protocol or you prompt it. Saying *"save what you learned"* at the end of a session is a good habit.
 
 ---
+
+## 5. Multi-project features (board)
+
+One feature, several projects, several agents in parallel. Each agent works in its own project, knows the shared feature context, and coordinates through a local board.
+
+```bash
+# 1. Plan. Interactively: ask the agent to "plan a feature" (aos-plan-feature skill),
+#    or by hand:
+aos feature new checkout-v2 --title "Checkout v2" --projects shop-api,web,billing
+$EDITOR ~/.agenticos/data/features/checkout-v2/brief.md      # goal, scope
+$EDITOR ~/.agenticos/data/features/checkout-v2/contract.md   # APIs/events shared between projects
+aos task add checkout-v2 shop-api "Orders endpoint"
+aos task add checkout-v2 web "Checkout UI" --after 1
+aos task add checkout-v2 billing "Invoice on order" --after 1 --worker kiro
+
+# 2. Run: workers start in parallel (one per project at a time), each in its own git worktree
+aos board run --feature checkout-v2
+
+# 3. Watch and steer (another terminal)
+aos board                                   # status, blockers, stuck tasks, pending proposals
+aos task show 2 --log                       # what a worker did
+aos feature approve 4 | reject 4            # contract change proposed by a worker
+aos task unblock 3 --note "key is in vault" # answer a blocker
+aos task retry 2 --resume --note "rename the button"   # feedback on a finished task
+```
+
+**What each worker gets.**
+- *General:* SOUL, rules, org memory, the feature brief, the current contract, and the latest timeline.
+- *Specific:* its project's memory, its task spec, the results of the tasks it depends on, and graphskill.
+- *Tools:* `task_show`, `board_read`, `task_comment`, `task_block`, `task_propose_contract`, `task_create`, `task_complete`.
+
+**Where the work lands.** `~/.agenticos/worktrees/<feature>/<project>` on branch `feature/<feature>`. Your own checkouts are never touched, and nothing is pushed. Review the branches, then merge or open PRs yourself.
+
+**Claude Code or Kiro.** Each task runs on a worker profile:
+1. `--worker` on the task;
+2. `projects.<slug>.worker.profile` in `~/.agenticos/data/projects.yaml`;
+3. `board.default_worker` in `aos.yaml`.
+
+Kiro workers need `kiro-cli` with `KIRO_API_KEY` (or a login). Allowed tools per project:
+```yaml
+# ~/.agenticos/data/projects.yaml
+projects:
+  shop-api:
+    worker: {profile: claude, allowed_tools: ["shell:npm test", "shell:npm run lint"]}
+```
+Workers never get "allow everything": only the listed tools, plus file edits inside their worktree.
+
+**Data.** The board is one SQLite file, `~/.agenticos/data/board.db` (no server). Feature files, logs and run contexts sit next to it. All of it is local.
 
 ## Layout
 
