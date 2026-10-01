@@ -1,0 +1,9 @@
+# agenticOS settings. Values here override aos/config.py DEFAULTS.
+memory:
+  org:     {cap: 4000, mode: inbox}   # shared by every project: team reviews changes
+  project: {cap: 2200, mode: direct}
+  user:    {cap: 1375, mode: direct}  # stored in ~/.agenticos/user.md, never in this repo
+skills:
+  mode: direct
+context:
+  max_chars: 16000
