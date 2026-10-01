@@ -21,6 +21,17 @@ DEFAULTS = {
     },
     "skills": {"mode": "direct"},
     "context": {"max_chars": 16000},
+    "board": {"parallel": 3, "max_tasks_per_feature": 30, "default_worker": "claude"},
+    "workers": {
+        "common": {
+            "timeout_min": 45,
+            "max_attempts": 2,
+            "allowed_tools": ["read", "write", "shell:git status", "shell:git diff", "shell:git log",
+                              "shell:git add", "shell:git commit", "mcp:aos", "mcp:graphskill"],
+        },
+        "claude": {"model": "sonnet"},
+        "kiro": {"model": None},
+    },
 }
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
