@@ -16,6 +16,8 @@ from .config import load_user_config, repo_root, slug_for_path
 from .core import AOS
 from .errors import AosError
 from .knowledge import KnowledgeIndex
+from .board import Board
+from .workers.common import profile_settings, resolve_profile
 
 
 def _safe(fn):
@@ -93,7 +95,101 @@ class Tools:
         return self.aos.project_context(slug)
 
 
-def build_server(tools: Tools):
+WORKER_TOOLS = {"task_show", "board_read", "task_comment", "task_block", "task_propose_contract",
+                "task_create", "task_complete"}
+PLANNER_TOOLS = {"feature_create", "feature_show", "task_create", "board_read"}
+
+
+class BoardTools:
+    """Board access over MCP. With task_id: a worker's tools for its own task.
+    Without: planner tools for creating features and tasks."""
+
+    def __init__(self, aos: AOS, task_id: int | None = None):
+        self.aos = aos
+        self.board = Board(aos.data, aos.settings["board"]["max_tasks_per_feature"])
+        self.task_id = int(task_id) if task_id is not None else None
+
+    @property
+    def author(self) -> str:
+        return f"task:{self.task_id}" if self.task_id else "planner"
+
+    def _own(self) -> dict:
+        if not self.task_id:
+            raise AosError("this tool is only available to board workers")
+        return self.board.task(self.task_id)
+
+    def _new_task(self, feature: str, project: str, title: str, spec: str, depends_on) -> dict:
+        if project not in self.aos.projects():
+            raise AosError(f"unknown project {project!r}", "call project_list; link it with aos link")
+        profile = resolve_profile(self.aos, project)
+        attempts = profile_settings(self.aos, profile, project)["max_attempts"]
+        tid = self.board.add_task(feature, project, title, spec, depends_on or [], worker=profile,
+                                  max_attempts=attempts, created_by=self.author)
+        return {"task": tid, "worker": profile}
+
+    # -- worker mode ---------------------------------------------------------
+    @_safe
+    def task_show(self) -> dict:
+        t = self._own()
+        self.board.mark_seen(t["id"])
+        return {"task": t, "feature": self.board.feature(t["feature"]), "brief": self.board.brief(t["feature"]),
+                "contract": self.board.contract(t["feature"]),
+                "depends_on": self.board.dependency_results(t["id"])}
+
+    @_safe
+    def task_comment(self, text: str) -> dict:
+        self.board.comment(self._own()["id"], text, self.author)
+        return {"ok": True}
+
+    @_safe
+    def task_block(self, reason: str) -> dict:
+        self.board.block(self._own()["id"], reason, self.author)
+        return {"ok": True, "message": "blocked; stop working on this task now"}
+
+    @_safe
+    def task_propose_contract(self, change: str, reason: str) -> dict:
+        pid = self.board.propose(self._own()["id"], change, reason, self.author)
+        return {"proposal": pid, "message": "a human will decide; continue with parts the change doesn't affect"}
+
+    @_safe
+    def task_complete(self, summary: str) -> dict:
+        self.board.complete(self._own()["id"], summary, self.author)
+        return {"ok": True}
+
+    # -- both modes ----------------------------------------------------------
+    @_safe
+    def board_read(self, feature: str | None = None, since_event: int = 0) -> dict:
+        if self.task_id:
+            t = self._own()
+            feature = t["feature"]
+            self.board.mark_seen(t["id"])
+        if not feature:
+            raise AosError("feature is required")
+        return {"events": self.board.events(feature, since_event),
+                "contract_version": self.board.feature(feature)["contract_version"]}
+
+    @_safe
+    def task_create(self, project: str, title: str, spec: str = "", depends_on: list[int] | None = None,
+                    feature: str | None = None) -> dict:
+        if self.task_id:
+            feature = self._own()["feature"]
+        if not feature:
+            raise AosError("feature is required")
+        return self._new_task(feature, project, title, spec, depends_on)
+
+    # -- planner mode --------------------------------------------------------
+    @_safe
+    def feature_create(self, slug: str, title: str, brief: str = "", contract: str = "") -> dict:
+        return self.board.create_feature(slug, title, brief, contract, author=self.author)
+
+    @_safe
+    def feature_show(self, slug: str) -> dict:
+        return {"feature": self.board.feature(slug), "brief": self.board.brief(slug),
+                "contract": self.board.contract(slug), "tasks": self.board.tasks(feature=slug),
+                "pending_proposals": self.board.proposals(slug, "pending")}
+
+
+def build_server(tools: Tools, board_tools: BoardTools | None = None):
     try:  # mcp 2.x renamed FastMCP to MCPServer; same decorator API
         from mcp.server.mcpserver import MCPServer as Server
     except ImportError:
@@ -157,10 +253,71 @@ def build_server(tools: Tools):
         """Read another project's description and memory."""
         return tools.project_context(slug)
 
+    if board_tools is not None:
+        _register_board_tools(mcp, board_tools)
     return mcp
 
 
-def run_server(project: str | Path) -> None:
+def _register_board_tools(mcp, bt: BoardTools) -> None:
+    if bt.task_id:
+        @mcp.tool()
+        def task_show() -> dict:
+            """Your board task: spec, feature brief, current contract and the results of tasks you depend on. Call first."""
+            return bt.task_show()
+
+        @mcp.tool()
+        def board_read(since_event: int = 0) -> dict:
+            """The feature timeline (other workers' progress, contract changes). Call before each step and before finishing."""
+            return bt.board_read(since_event=since_event)
+
+        @mcp.tool()
+        def task_comment(text: str) -> dict:
+            """Post progress or a note for other workers and the human."""
+            return bt.task_comment(text)
+
+        @mcp.tool()
+        def task_block(reason: str) -> dict:
+            """Stop: you cannot continue without a human. Explain exactly what is needed."""
+            return bt.task_block(reason)
+
+        @mcp.tool()
+        def task_propose_contract(change: str, reason: str) -> dict:
+            """Propose a change to the shared contract between projects; keep working on unaffected parts."""
+            return bt.task_propose_contract(change, reason)
+
+        @mcp.tool()
+        def task_create(project: str, title: str, spec: str = "", depends_on: list[int] | None = None) -> dict:
+            """Add a follow-up task to this feature (any linked project)."""
+            return bt.task_create(project, title, spec, depends_on)
+
+        @mcp.tool()
+        def task_complete(summary: str) -> dict:
+            """Finish your task: what changed, commits, how it was tested, what dependent tasks need to know."""
+            return bt.task_complete(summary)
+    else:
+        @mcp.tool()
+        def feature_create(slug: str, title: str, brief: str = "", contract: str = "") -> dict:
+            """Create a multi-project feature with its brief and the shared contract (APIs, events, schemas)."""
+            return bt.feature_create(slug, title, brief, contract)
+
+        @mcp.tool()
+        def feature_show(slug: str) -> dict:
+            """A feature's brief, contract, tasks and pending contract proposals."""
+            return bt.feature_show(slug)
+
+        @mcp.tool()
+        def task_create(project: str, title: str, feature: str, spec: str = "",
+                        depends_on: list[int] | None = None) -> dict:
+            """Add a task for one project to a feature; depends_on lists task ids that must finish first."""
+            return bt.task_create(project, title, spec, depends_on, feature=feature)
+
+        @mcp.tool()
+        def board_read(feature: str, since_event: int = 0) -> dict:
+            """A feature's timeline."""
+            return bt.board_read(feature=feature, since_event=since_event)
+
+
+def run_server(project: str | Path, task: int | None = None) -> None:
     from .link import sync
 
     cfg = load_user_config()
@@ -172,11 +329,13 @@ def run_server(project: str | Path) -> None:
         if slug:
             sync(project)
 
-    tools = Tools(AOS(repo, slug=slug), on_skills_changed=resync)
+    aos = AOS(repo, slug=slug)
+    tools = Tools(aos, on_skills_changed=resync)
+    board_tools = BoardTools(aos, task_id=task)
     cwd = os.getcwd()
     os.chdir(Path.home())  # FastMCP reads .env from cwd; keep project env files out of it
     try:
-        mcp = build_server(tools)
+        mcp = build_server(tools, board_tools)
     finally:
         os.chdir(cwd)
     mcp.run()
