@@ -56,7 +56,8 @@ class Memory:
 
     def _save(self, entries: list[str]) -> None:
         size = len(render(entries))
-        if size > self.cap:
+        # Over-cap files (hand edits, git merges, a lowered cap) must still be shrinkable.
+        if size > self.cap and size > len(read_text(self.path)):
             raise AosError(
                 f"memory full: change would use {size}/{self.cap} chars",
                 "consolidate or remove entries (memory_replace / memory_remove), then retry",

@@ -16,7 +16,7 @@ from .core import AOS
 from .errors import AosError
 from .skills import skills_for
 from .store import read_text, write_atomic
-from .writer import LinkContext, Writer
+from .writer import LinkContext, Writer, check_json_shape
 
 TARGETS = {"claude": claude, "kiro": kiro}
 
@@ -30,13 +30,15 @@ def _check_targets(targets) -> list[str]:
 
 
 def _preflight(project: Path, targets: list[str]) -> None:
+    """Validate every JSON file a render will touch, so a bad file aborts before any write."""
     for rel in sorted({f for t in targets for f in TARGETS[t].JSON_FILES}):
         text = read_text(project / rel)
         if text.strip():
             try:
-                json.loads(text)
+                data = json.loads(text)
             except json.JSONDecodeError as e:
                 raise AosError(f"cannot parse {rel}: {e}", "fix or remove the file, then re-run")
+            check_json_shape(rel, data)
 
 
 def setup_graphskill(project: Path, runner=subprocess.run) -> str:
@@ -53,6 +55,7 @@ def setup_graphskill(project: Path, runner=subprocess.run) -> str:
 
 
 def render_project(project: Path, slug: str, repo: Path, targets: list[str]) -> dict:
+    _preflight(project, targets)
     w = Writer(project, Writer.load_manifest(project))
     ctx = LinkContext(project, slug, repo, shutil.which("aos") or "aos", skills_for(repo, slug))
     for t in targets:

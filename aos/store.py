@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import stat
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,14 +19,25 @@ def read_text(path: str | Path) -> str:
         return ""
 
 
-def write_atomic(path: str | Path, data: str | bytes) -> None:
+def _default_mode() -> int:
+    umask = os.umask(0)
+    os.umask(umask)
+    return 0o666 & ~umask
+
+
+def write_atomic(path: str | Path, data: str | bytes, mode: int | None = None) -> None:
+    """Replace `path` atomically. Keeps the existing file's mode unless `mode` is given;
+    new files get the usual umask-derived mode (mkstemp alone would leave them 0600)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     raw = data.encode("utf-8") if isinstance(data, str) else data
+    if mode is None:
+        mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else _default_mode()
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(raw)
+        os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)

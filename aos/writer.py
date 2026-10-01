@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +19,26 @@ from .store import read_text, write_atomic
 MANIFEST = ".aos/manifest.json"
 BEGIN = "# >>> agenticOS (managed) >>>"
 END = "# <<< agenticOS (managed) <<<"
+
+
+def check_hooks_shape(rel: str, data: dict) -> None:
+    """Claude settings: hooks = {event: [ {hooks: [...]}, ... ]}."""
+    hooks = data.get("hooks", {})
+    if not isinstance(hooks, dict):
+        raise AosError(f"{rel}: 'hooks' is not a JSON object")
+    for event, groups in hooks.items():
+        if not isinstance(groups, list) or not all(
+                isinstance(g, dict) and isinstance(g.get("hooks", []), list) for g in groups):
+            raise AosError(f"{rel}: hooks.{event} must be a list of hook groups")
+
+
+def check_json_shape(rel: str, data) -> None:
+    """Shape checks for every JSON file aos merges into, run before any write."""
+    if not isinstance(data, dict):
+        raise AosError(f"{rel} must contain a JSON object")
+    if not isinstance(data.get("mcpServers", {}), dict):
+        raise AosError(f"{rel}: 'mcpServers' is not a JSON object")
+    check_hooks_shape(rel, data)
 
 
 def _sha(data: bytes) -> str:
@@ -61,7 +82,13 @@ class LinkContext:
 
     @property
     def mcp_server(self) -> dict:
+        """Per-user entry (absolute paths) for files that are not usually committed."""
         return {"command": self.aos_bin, "args": ["serve", "--project", str(self.project)]}
+
+    @property
+    def portable_mcp_server(self) -> dict:
+        """Committable entry: `aos` on PATH, project = the server's cwd (the project root)."""
+        return {"command": "aos", "args": ["serve", "--project", "."]}
 
     def context_command(self, project_expr: str) -> str:
         return f'"{self.aos_bin}" context --project "{project_expr}"'
@@ -90,11 +117,11 @@ class Writer:
             raise AosError(f"corrupt {MANIFEST}", "delete it and re-run `aos link`")
 
     # -- primitives ----------------------------------------------------------
-    def _write(self, rel: str, data: bytes, track: bool = False) -> None:
+    def _write(self, rel: str, data: bytes, track: bool = False, mode: int | None = None) -> None:
         p = self.project / rel
         if track and not p.exists():
             self.created.add(rel)
-        write_atomic(p, data)
+        write_atomic(p, data, mode)
         self.changed.append(rel)
 
     def _delete(self, rel: str) -> None:
@@ -124,7 +151,7 @@ class Writer:
             self._write(rel, (json.dumps(data, indent=2) + "\n").encode(), track=True)
 
     # -- owned outputs -------------------------------------------------------
-    def file(self, rel: str, data: str | bytes) -> None:
+    def file(self, rel: str, data: str | bytes, mode: int | None = None) -> None:
         raw = data.encode("utf-8") if isinstance(data, str) else data
         p = self.project / rel
         if p.exists() and rel not in self.old.get("files", {}):
@@ -132,9 +159,14 @@ class Writer:
             return
         self.files[rel] = _sha(raw)
         if not p.exists() or p.read_bytes() != raw:
-            self._write(rel, raw)
+            self._write(rel, raw, mode=mode)
+        elif mode is not None and stat.S_IMODE(p.stat().st_mode) != mode:
+            p.chmod(mode)
+            self.changed.append(rel)
 
-    def json_key(self, rel: str, keys: list[str], value) -> None:
+    def json_key(self, rel: str, keys: list[str], value, adopt: bool = False) -> None:
+        """Own `keys` in a JSON file. An existing unowned value is a conflict unless
+        `adopt` (used for aos's own server entry, e.g. one a teammate committed)."""
         data = self._load_json(rel)
         node = data
         for k in keys[:-1]:
@@ -142,7 +174,8 @@ class Writer:
                 raise AosError(f"{rel}: '{k}' is not a JSON object")
             node = node.setdefault(k, {})
         entry, last = [rel, *keys], keys[-1]
-        if last in node and node[last] != value and entry not in self.old.get("json_keys", []):
+        if (last in node and node[last] != value and not adopt
+                and entry not in self.old.get("json_keys", [])):
             self.conflicts.append(f"{rel}:{'.'.join(keys)}")
             return
         self.json_keys.append(entry)
@@ -152,6 +185,7 @@ class Writer:
 
     def hook(self, rel: str, event: str, command: str) -> None:
         data = self._load_json(rel)
+        check_hooks_shape(rel, data)
         groups = data.setdefault("hooks", {}).setdefault(event, [])
         self.hooks.append({"file": rel, "event": event, "command": command})
         if not any(h.get("command") == command for g in groups for h in g.get("hooks", [])):
@@ -250,5 +284,6 @@ def copy_skills(w: Writer, ctx: LinkContext, root: str) -> None:
         src = ctx.repo / "skills" / name
         for f in sorted(src.rglob("*")):
             if f.is_file():
-                w.file(f"{dest}/{f.relative_to(src).as_posix()}", f.read_bytes())
+                w.file(f"{dest}/{f.relative_to(src).as_posix()}", f.read_bytes(),
+                       mode=stat.S_IMODE(f.stat().st_mode))
         w.ignore.append(dest + "/")

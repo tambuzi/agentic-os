@@ -28,7 +28,9 @@ def _graphskill_server(ctx: LinkContext):
 
 
 def render(w: Writer, ctx: LinkContext) -> None:
-    w.json_key(MCP, ["mcpServers", "aos"], ctx.mcp_server)
+    # Kiro IDE may not inherit the shell PATH, so this entry uses absolute paths;
+    # adopt=True lets each developer's link take over a teammate's committed entry.
+    w.json_key(MCP, ["mcpServers", "aos"], ctx.mcp_server, adopt=True)
     gs = _graphskill_server(ctx)
     if gs:
         w.json_key(MCP, ["mcpServers", "graphskill"], gs)

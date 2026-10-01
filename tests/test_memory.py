@@ -70,3 +70,13 @@ def test_section_sign_inline_is_fine(tmp_path):
     m = mem(tmp_path)
     m.add("see § 4.1")
     assert m.entries() == ["see § 4.1"]
+
+
+def test_over_cap_memory_can_still_shrink(tmp_path):
+    p = tmp_path / "m.md"
+    p.write_text(render(["a" * 40, "b" * 40, "c" * 40]))
+    m = Memory(p, 50)
+    assert m.remove("ccc")["entries"] == ["a" * 40, "b" * 40]
+    assert m.replace("aaa", "x")["entries"] == ["x", "b" * 40]
+    with pytest.raises(AosError):
+        m.add("y" * 60)

@@ -33,3 +33,19 @@ def test_inside_rejects_escape(tmp_path):
     assert inside(tmp_path, "a/b.md") == (tmp_path / "a" / "b.md").resolve()
     with pytest.raises(AosError):
         inside(tmp_path, "../etc/passwd")
+
+
+def test_write_atomic_preserves_and_defaults_mode(tmp_path):
+    import os
+    umask = os.umask(0)
+    os.umask(umask)
+    new = tmp_path / "new.txt"
+    write_atomic(new, "x")
+    assert new.stat().st_mode & 0o777 == 0o666 & ~umask
+    old = tmp_path / "old.sh"
+    old.write_text("a")
+    old.chmod(0o755)
+    write_atomic(old, "b")
+    assert old.stat().st_mode & 0o777 == 0o755
+    write_atomic(new, "y", mode=0o700)
+    assert new.stat().st_mode & 0o777 == 0o700

@@ -26,8 +26,7 @@ def env(configured, project, monkeypatch, make_skill):
 def test_link_writes_claude_and_kiro(env, configured):
     p = env
     rep = link(p, slug="shop")
-    assert load(p / ".mcp.json")["mcpServers"]["aos"] == {
-        "command": "/bin/aos", "args": ["serve", "--project", str(p.resolve())]}
+    assert load(p / ".mcp.json")["mcpServers"]["aos"] == {"command": "aos", "args": ["serve", "--project", "."]}
     assert load(p / ".claude/settings.local.json")["hooks"]["SessionStart"] == [
         {"hooks": [{"type": "command", "command": '"/bin/aos" context --project "$CLAUDE_PROJECT_DIR"'}]}]
     assert (p / ".claude/skills/deploy-app/scripts/run.sh").read_text() == "echo hi\n"
@@ -146,3 +145,44 @@ def test_graphskill_failure_is_reported_not_fatal(env):
     rep = link(env, slug="shop", runner=runner)
     assert "failed" in rep["graphskill"] and "No module named" in rep["graphskill"]
     assert (env / ".mcp.json").exists()
+
+
+@pytest.mark.parametrize("rel,content", [
+    (".kiro/settings/mcp.json", {"mcpServers": []}),
+    (".claude/settings.local.json", {"hooks": []}),
+    (".claude/settings.local.json", {"hooks": {"SessionStart": {"x": 1}}}),
+    (".mcp.json", ["not", "an", "object"]),
+])
+def test_wrong_shape_json_aborts_cleanly(env, rel, content):
+    (env / rel).parent.mkdir(parents=True, exist_ok=True)
+    (env / rel).write_text(json.dumps(content))
+    with pytest.raises(AosError) as e:
+        link(env, slug="shop")
+    assert rel in e.value.message
+    assert not (env / ".claude/skills").exists() and not (env / ".aos").exists()
+    assert "shop" not in load_user_config()["projects"]
+
+
+def test_claude_mcp_entry_is_portable(env):
+    link(env, slug="shop")
+    assert load(env / ".mcp.json")["mcpServers"]["aos"] == {"command": "aos", "args": ["serve", "--project", "."]}
+
+
+def test_teammates_committed_aos_entries_are_adopted(env):
+    (env / ".mcp.json").write_text(json.dumps({"mcpServers": {"aos": {"command": "aos", "args": ["serve", "--project", "."]}}}))
+    (env / ".kiro/settings").mkdir(parents=True)
+    alice = {"command": "/Users/alice/.local/bin/aos", "args": ["serve", "--project", "/Users/alice/shop"]}
+    (env / ".kiro/settings/mcp.json").write_text(json.dumps({"mcpServers": {"aos": alice}}))
+    rep = link(env, slug="shop")
+    assert rep["conflicts"] == []
+    assert load(env / ".kiro/settings/mcp.json")["mcpServers"]["aos"]["args"] == ["serve", "--project", str(env.resolve())]
+
+
+def test_file_modes_are_preserved(env, configured):
+    (configured / "skills/deploy-app/scripts/run.sh").chmod(0o755)
+    (env / ".gitignore").write_text("node_modules/\n")
+    (env / ".gitignore").chmod(0o644)
+    link(env, slug="shop")
+    assert (env / ".gitignore").stat().st_mode & 0o777 == 0o644
+    assert (env / ".claude/skills/deploy-app/scripts/run.sh").stat().st_mode & 0o777 == 0o755
+    assert (env / ".mcp.json").stat().st_mode & 0o044  # group/other readable like any new file
