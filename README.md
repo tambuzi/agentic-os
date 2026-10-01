@@ -11,11 +11,16 @@ A shared, self-improving brain for **Claude Code** and **Kiro** across all our p
 
 ```bash
 git clone <this repo> ~/agenticOS && cd ~/agenticOS
-python3.13 -m venv .venv && .venv/bin/pip install -e .
-ln -s "$PWD/.venv/bin/aos" ~/.local/bin/aos      # or put .venv/bin on PATH
+python3.13 -m venv ~/.agenticos/venv && ~/.agenticos/venv/bin/pip install -e .
+ln -sf ~/.agenticos/venv/bin/aos ~/.local/bin/aos
 aos init . --graphskill "graphskill"             # or '/path/to/venv/bin/python -m graphskill'
 aos doctor
 ```
+
+> **macOS + iCloud Desktop:** keep the runtime venv outside `~/Desktop`/`~/Documents`. iCloud marks
+> files there `hidden`, and Python 3.13 silently skips hidden `.pth` files, so editable installs fail
+> with `No module named 'aos'`. For running tests, a repo-local `.venv` is fine (`chflags nohidden
+> .venv/lib/python3.13/site-packages/*.pth` if needed).
 
 ## Use
 
