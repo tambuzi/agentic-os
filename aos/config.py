@@ -30,6 +30,16 @@ def aos_home() -> Path:
     return Path(os.environ.get("AOS_HOME", Path.home() / ".agenticos")).expanduser()
 
 
+def data_root(cfg: dict | None = None) -> Path:
+    """Local business data (memory, knowledge, inbox, project registry).
+
+    Never inside the agenticOS git repo, so it can't be pushed. Default
+    $AOS_HOME/data; override with `data_dir` in config.yaml.
+    """
+    raw = (cfg if cfg is not None else load_user_config()).get("data_dir")
+    return Path(raw).expanduser().resolve() if raw else aos_home() / "data"
+
+
 def _deep_merge(base: dict, over: dict) -> dict:
     for k, v in over.items():
         if isinstance(v, dict) and isinstance(base.get(k), dict):

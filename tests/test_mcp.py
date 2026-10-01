@@ -47,8 +47,8 @@ def test_sync_failure_does_not_fail_tool(repo, home):
     assert r["applied"] and "disk full" in r["sync_warning"]
 
 
-def test_knowledge_and_projects(repo, home):
-    (repo / "knowledge/a.md").write_text("# Pricing\nPlans are monthly.\n")
+def test_knowledge_and_projects(repo, home, data):
+    (data / "knowledge/a.md").write_text("# Pricing\nPlans are monthly.\n")
     t = tools(repo)
     assert t.knowledge_search("monthly")["results"][0]["path"] == "knowledge/a.md"
     assert t.knowledge_read("knowledge/a.md")["content"].startswith("# Pricing")

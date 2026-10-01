@@ -18,12 +18,19 @@ def home(tmp_path, monkeypatch) -> Path:
 @pytest.fixture
 def repo(tmp_path) -> Path:
     r = tmp_path / "agenticOS"
-    (r / "memory" / "projects").mkdir(parents=True)
-    (r / "skills").mkdir()
-    (r / "knowledge").mkdir()
+    (r / "skills").mkdir(parents=True)
     (r / "SOUL.md").write_text("You are the team agent.\n")
     (r / "AGENTS.md").write_text("# Org rules\n- Use UTC.\n")
     return r
+
+
+@pytest.fixture
+def data(home) -> Path:
+    """Local business data dir (default: $AOS_HOME/data)."""
+    d = home / "data"
+    (d / "memory" / "projects").mkdir(parents=True)
+    (d / "knowledge").mkdir()
+    return d
 
 
 @pytest.fixture

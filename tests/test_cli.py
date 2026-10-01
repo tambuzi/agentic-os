@@ -57,3 +57,10 @@ def test_bad_targets(configured, project, capsys):
 def test_doctor(configured, capsys):
     code, out, _ = run(["doctor"], capsys)
     assert code == 0 and "repo" in out
+
+
+def test_init_rejects_data_dir_inside_repo(repo, home, capsys):
+    code, _, err = run(["init", str(repo), "--data-dir", str(repo / "data")], capsys)
+    assert code == 1 and "outside" in err
+    assert run(["init", str(repo), "--data-dir", str(home / "biz")], capsys)[0] == 0
+    assert load_user_config()["data_dir"] == str((home / "biz").resolve())

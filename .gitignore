@@ -5,3 +5,8 @@ build/
 .pytest_cache/
 .*.lock
 .superpowers/
+# Business data is local-only (~/.agenticos/data). Never commit it here.
+/memory/
+/knowledge/
+/inbox/
+/projects.yaml

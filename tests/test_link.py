@@ -23,7 +23,7 @@ def env(configured, project, monkeypatch, make_skill):
     return project
 
 
-def test_link_writes_claude_and_kiro(env, configured):
+def test_link_writes_claude_and_kiro(env, configured, home):
     p = env
     rep = link(p, slug="shop")
     assert load(p / ".mcp.json")["mcpServers"]["aos"] == {"command": "aos", "args": ["serve", "--project", "."]}
@@ -38,8 +38,9 @@ def test_link_writes_claude_and_kiro(env, configured):
     assert (p / ".kiro/skills/deploy-app/SKILL.md").exists()
     gi = (p / ".gitignore").read_text()
     assert ".aos/" in gi and ".claude/skills/deploy-app/" in gi and ".kiro/skills/deploy-app/" in gi
-    assert (configured / "memory/projects/shop.md").exists()
-    assert "shop" in yaml.safe_load((configured / "projects.yaml").read_text())["projects"]
+    assert (home / "data/memory/projects/shop.md").exists()
+    assert "shop" in yaml.safe_load((home / "data/projects.yaml").read_text())["projects"]
+    assert not (configured / "memory").exists() and not (configured / "projects.yaml").exists()
     assert load_user_config()["projects"]["shop"]["path"] == str(p.resolve())
     assert rep["graphskill"].startswith("graphskill:")
 

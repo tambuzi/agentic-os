@@ -3,6 +3,12 @@
 Date: 2026-10-01
 Status: draft for review
 
+> **Amendment 2026-10-01 (local business data):** business memory, knowledge, the inbox and
+> the project registry are local-only, in `$AOS_HOME/data` (configurable `data_dir`, which must be
+> outside the repo). The git repo carries only code, skills, `SOUL.md`, `AGENTS.md` and `aos.yaml`.
+> Wherever this spec puts `memory/`, `knowledge/`, `inbox/` or `projects.yaml` in the repo, read
+> the data dir instead. Team sharing of business data through git is dropped.
+
 ## 1. Intent
 
 **What we want.** A team-shared "agentic OS" that gives Claude Code and Kiro a

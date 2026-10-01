@@ -33,7 +33,7 @@ def _safe(fn):
 class Tools:
     def __init__(self, aos: AOS, on_skills_changed=None):
         self.aos = aos
-        self.index = KnowledgeIndex(aos.repo, aos.home / "aos.db")
+        self.index = KnowledgeIndex(aos.repo, aos.home / "aos.db", aos.data)
         self.on_skills_changed = on_skills_changed
 
     def _source(self) -> str:

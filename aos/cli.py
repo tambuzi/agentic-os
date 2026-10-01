@@ -12,7 +12,7 @@ from pathlib import Path
 import yaml
 
 from . import inbox
-from .config import aos_home, load_user_config, repo_root, save_user_config, slug_for_path
+from .config import aos_home, data_root, load_user_config, repo_root, save_user_config, slug_for_path
 from .core import AOS
 from .errors import AosError
 
@@ -34,8 +34,16 @@ def cmd_init(a) -> int:
     cfg["repo"] = str(repo)
     if a.graphskill:
         cfg["graphskill_cmd"] = shlex.split(a.graphskill)
+    if a.data_dir:
+        data = Path(a.data_dir).expanduser().resolve()
+        if data == repo or repo in data.parents:
+            raise AosError("data dir must be outside the agenticOS repo", "business data must never be pushed")
+        cfg["data_dir"] = str(data)
     save_user_config(cfg)
-    print(f"agenticOS repo: {repo}\nuser state:     {aos_home()}")
+    data = data_root(cfg)
+    for d in ("memory/projects", "knowledge", "inbox"):
+        (data / d).mkdir(parents=True, exist_ok=True)
+    print(f"agenticOS repo: {repo}\nuser state:     {aos_home()}\nlocal data:     {data_root(cfg)}")
     return 0
 
 
@@ -89,20 +97,20 @@ def cmd_serve(a) -> int:
 
 
 def cmd_inbox(a) -> int:
-    repo = repo_root()
+    aos = AOS(repo_root())
     if a.action == "list":
-        items = inbox.list_proposals(repo)
+        items = inbox.list_proposals(aos.data)
         if not items:
             print("inbox empty")
         for p in items:
             print(f"{p['id']}  {p['kind']}.{p['op']}  {p.get('source') or '-'}  {p.get('reason') or ''}")
     elif a.action == "show":
-        print(yaml.safe_dump(inbox.load(repo, a.id), sort_keys=False, allow_unicode=True), end="")
+        print(yaml.safe_dump(inbox.load(aos.data, a.id), sort_keys=False, allow_unicode=True), end="")
     elif a.action == "apply":
-        AOS(repo).apply_proposal(a.id)
+        aos.apply_proposal(a.id)
         print(f"applied {a.id}")
     else:
-        AOS(repo).reject_proposal(a.id)
+        aos.reject_proposal(a.id)
         print(f"rejected {a.id}")
     return 0
 
@@ -110,14 +118,15 @@ def cmd_inbox(a) -> int:
 def cmd_status(a) -> int:
     repo = repo_root()
     r = subprocess.run(
-        ["git", "-C", str(repo), "status", "--porcelain", "--",
-         "memory", "skills", "knowledge", "inbox", "projects.yaml"],
+        ["git", "-C", str(repo), "status", "--porcelain", "--", "skills"],
         capture_output=True, text=True,
     )
     if r.returncode != 0:
         raise AosError("git status failed", r.stderr.strip())
-    print(r.stdout.rstrip() or "no uncommitted agenticOS changes")
-    print(f"inbox: {len(inbox.list_proposals(repo))} proposal(s)")
+    print(r.stdout.rstrip() or "no uncommitted skill changes")
+    data = AOS(repo).data
+    print(f"local data: {data}")
+    print(f"inbox: {len(inbox.list_proposals(data))} proposal(s)")
     return 0
 
 
@@ -149,6 +158,7 @@ def _parser() -> argparse.ArgumentParser:
     s = sub.add_parser("init", help="point this machine at an agenticOS repo")
     s.add_argument("repo", nargs="?", default=".")
     s.add_argument("--graphskill", help="command that runs graphskill, e.g. '/path/.venv/bin/python -m graphskill'")
+    s.add_argument("--data-dir", help="local business data dir (default: ~/.agenticos/data); never inside the repo")
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("link", help="make a project agenticOS-aware")

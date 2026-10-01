@@ -4,7 +4,8 @@ A shared, self-improving brain for **Claude Code** and **Kiro** across all our p
 
 - **Memory**: small, capped, always-in-context facts: `org` (all projects, team-reviewed), `project`, `user`.
 - **Skills**: shared procedures (`skills/<name>/SKILL.md`) that agents can create and patch.
-- **Knowledge**: long-form docs in `knowledge/`, searchable by agents.
+- **Knowledge**: long-form business docs, searchable by agents.
+- **Local-only business data**: memory, knowledge, inbox and the project registry live in `~/.agenticos/data` on each machine, never in this repo or on GitHub. The repo holds only code, skills, `SOUL.md`/`AGENTS.md` and settings.
 - **Context injection**: every session starts with SOUL + org rules + memories.
 
 ## Install (once per developer)
@@ -14,6 +15,7 @@ git clone <this repo> ~/agenticOS && cd ~/agenticOS
 python3.13 -m venv ~/.agenticos/venv && ~/.agenticos/venv/bin/pip install -e .
 ln -sf ~/.agenticos/venv/bin/aos ~/.local/bin/aos
 aos init . --graphskill "graphskill"             # or '/path/to/venv/bin/python -m graphskill'
+                                                 # --data-dir <path> to move local data (must be outside the repo)
 aos doctor
 ```
 
@@ -35,7 +37,7 @@ aos unlink ~/code/shop-api               # removes only what aos added
 
 Then open the project in Claude Code or Kiro. Agents get the `aos` MCP tools: `memory_*`, `knowledge_search/read`, `skill_list/view/manage`, `project_list/context`.
 
-**Sharing:** memory, skills and knowledge are files in this repo. Commit and push them; teammates `git pull` and the next session picks them up. Org-memory changes made by agents wait in `inbox/` for review.
+**What is shared and what is not:** skills (and `SOUL.md`, `AGENTS.md`, `aos.yaml`) are shared through this repo: commit, push, teammates `git pull`. Business memory and knowledge stay local in `~/.agenticos/data` (outside iCloud-synced folders). Org-memory changes made by agents wait in the local inbox for `aos inbox apply`.
 
 ## What `aos link` writes
 
@@ -50,10 +52,11 @@ Ownership is tracked in `<project>/.aos/manifest.json`; aos never edits files or
 ## Layout
 
 ```
-SOUL.md  AGENTS.md  aos.yaml  projects.yaml
-memory/org.md  memory/projects/<slug>.md
-knowledge/  skills/  inbox/
-aos/  (python package)   tests/
+agenticOS repo (GitHub)            ~/.agenticos (local only)
+  SOUL.md  AGENTS.md  aos.yaml       config.yaml  user.md  aos.db
+  skills/                            data/
+  aos/  (python package)               memory/org.md  memory/projects/<slug>.md
+  tests/  docs/                        knowledge/  inbox/  projects.yaml
 ```
 
 ## Roadmap

@@ -1,7 +1,7 @@
 import pytest
 
 from aos.config import (
-    check_slug, default_slug, graphskill_cmd, load_settings, repo_root,
+    check_slug, data_root, default_slug, graphskill_cmd, load_settings, repo_root,
     save_user_config, slug_for_path,
 )
 from aos.errors import AosError
@@ -55,3 +55,9 @@ def test_graphskill_cmd(home, monkeypatch):
     assert graphskill_cmd() is None
     save_user_config({"projects": {}, "graphskill_cmd": ["/x/python", "-m", "graphskill"]})
     assert graphskill_cmd() == ["/x/python", "-m", "graphskill"]
+
+
+def test_data_root_default_and_override(home, tmp_path):
+    assert data_root() == home / "data"
+    save_user_config({"projects": {}, "data_dir": str(tmp_path / "biz")})
+    assert data_root() == (tmp_path / "biz").resolve()

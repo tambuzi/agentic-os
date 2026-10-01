@@ -1,4 +1,4 @@
-"""Full-text search over knowledge/, memory/ and skills/ (SQLite FTS5).
+"""Full-text search over local knowledge/ and memory/ (data dir) plus repo skills/ (SQLite FTS5).
 
 The index is derived state in $AOS_HOME/aos.db and is rebuilt whenever the
 set of source files or any mtime changes. Cheap at team-repo scale.
@@ -15,7 +15,8 @@ from .errors import AosError
 from .skills import split_frontmatter
 from .store import inside
 
-PATTERNS = ("knowledge/**/*.md", "memory/**/*.md", "skills/*/SKILL.md")
+DATA_TOPS = ("knowledge", "memory")  # top-level dirs that live in the local data dir
+PATTERNS = (("data", "knowledge/**/*.md"), ("data", "memory/**/*.md"), ("repo", "skills/*/SKILL.md"))
 
 
 def _title(rel: str, text: str) -> str:
@@ -33,9 +34,13 @@ def _title(rel: str, text: str) -> str:
 
 
 class KnowledgeIndex:
-    def __init__(self, repo: str | Path, db_path: str | Path):
-        self.repo = Path(repo).resolve()
+    def __init__(self, repo: str | Path, db_path: str | Path, data: str | Path):
+        self.roots = {"repo": Path(repo).resolve(), "data": Path(data).resolve()}
         self.db_path = Path(db_path)
+
+    def _root_for(self, rel: str) -> Path:
+        top = Path(rel).parts[0] if Path(rel).parts else ""
+        return self.roots["data"] if top in DATA_TOPS else self.roots["repo"]
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -46,9 +51,10 @@ class KnowledgeIndex:
 
     def _sources(self) -> dict[str, float]:
         out = {}
-        for pattern in PATTERNS:
-            for p in self.repo.glob(pattern):
-                rel = p.relative_to(self.repo)
+        for root_key, pattern in PATTERNS:
+            root = self.roots[root_key]
+            for p in root.glob(pattern):
+                rel = p.relative_to(root)
                 if any(part.startswith(".") for part in rel.parts):
                     continue
                 out[rel.as_posix()] = p.stat().st_mtime
@@ -63,7 +69,7 @@ class KnowledgeIndex:
             c.execute("DELETE FROM docs")
             c.execute("DELETE FROM doc_files")
             for rel, mtime in current.items():
-                text = (self.repo / rel).read_text(encoding="utf-8", errors="replace")
+                text = (self._root_for(rel) / rel).read_text(encoding="utf-8", errors="replace")
                 c.execute("INSERT INTO docs VALUES (?, ?, ?)", (rel, _title(rel, text), text))
                 c.execute("INSERT INTO doc_files VALUES (?, ?)", (rel, mtime))
         return True
@@ -83,7 +89,8 @@ class KnowledgeIndex:
         return [{"path": p, "title": t, "snippet": s, "score": round(-r, 3)} for p, t, s, r in rows]
 
     def read(self, rel: str) -> dict:
-        p = inside(self.repo, rel)
+        root = self._root_for(rel)
+        p = inside(root, rel)
         if p.suffix != ".md" or not p.is_file():
             raise AosError(f"no markdown file at {rel}", "use a path returned by knowledge_search")
-        return {"path": p.relative_to(self.repo).as_posix(), "content": p.read_text(encoding="utf-8")}
+        return {"path": p.relative_to(root.resolve()).as_posix(), "content": p.read_text(encoding="utf-8")}

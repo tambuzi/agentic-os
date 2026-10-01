@@ -1,4 +1,8 @@
-"""AOS: the one facade the CLI and MCP server use. Applies scopes and write modes."""
+"""AOS: the one facade the CLI and MCP server use. Applies scopes and write modes.
+
+`repo` is the agenticOS git repo (code, skills, SOUL/AGENTS, settings).
+`data` is local business data (memory, inbox, project registry), never in the repo.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +11,7 @@ from pathlib import Path
 import yaml
 
 from . import inbox, skills
-from .config import aos_home, check_slug, load_settings
+from .config import aos_home, check_slug, data_root, load_settings
 from .errors import AosError
 from .memory import Memory
 from .store import locked, read_text, write_atomic
@@ -26,16 +30,18 @@ def _require(op: str, table: dict, args: dict) -> None:
 
 
 class AOS:
-    def __init__(self, repo: str | Path, home: str | Path | None = None, slug: str | None = None):
+    def __init__(self, repo: str | Path, home: str | Path | None = None, slug: str | None = None,
+                 data: str | Path | None = None):
         self.repo = Path(repo)
         self.home = Path(home) if home else aos_home()
+        self.data = Path(data) if data else data_root()
         self.slug = slug
         self.settings = load_settings(self.repo)
 
     # -- memory --------------------------------------------------------------
     def memory_path(self, scope: str, slug: str | None = None) -> Path:
         if scope == "org":
-            return self.repo / "memory" / "org.md"
+            return self.data / "memory" / "org.md"
         if scope == "user":
             return self.home / "user.md"
         if scope == "project":
@@ -43,7 +49,7 @@ class AOS:
             if not s:
                 raise AosError("no project in this session", "run inside a linked project (aos link)")
             check_slug(s)
-            return self.repo / "memory" / "projects" / f"{s}.md"
+            return self.data / "memory" / "projects" / f"{s}.md"
         raise AosError(f"unknown scope {scope!r}", "one of: org, project, user")
 
     def memory(self, scope: str, slug: str | None = None) -> Memory:
@@ -61,7 +67,7 @@ class AOS:
             payload = {**args, "scope": scope}
             if scope == "project":
                 payload.setdefault("slug", self.slug)
-            pid = inbox.stage(self.repo, "memory", op, payload, source, reason)
+            pid = inbox.stage(self.data, "memory", op, payload, source, reason)
             return {"staged": pid, "message": f"{scope} memory change staged for team review"}
         if op == "add":
             return mem.add(args["text"])
@@ -75,7 +81,7 @@ class AOS:
         _require(action, SKILL_OPS, args)
         skills.check_name(name)
         if not direct and self.settings["skills"]["mode"] == "inbox":
-            pid = inbox.stage(self.repo, "skill", action, {**args, "name": name}, source, reason)
+            pid = inbox.stage(self.data, "skill", action, {**args, "name": name}, source, reason)
             return {"staged": pid, "message": "skill change staged for team review"}
         if action == "create":
             res = skills.create(self.repo, name, args["content"])
@@ -89,7 +95,7 @@ class AOS:
 
     # -- inbox ---------------------------------------------------------------
     def apply_proposal(self, pid: str) -> dict:
-        p = inbox.load(self.repo, pid)
+        p = inbox.load(self.data, pid)
         args = dict(p.get("args") or {})
         if p.get("kind") == "memory":
             res = self.memory_write(args.pop("scope"), p["op"], args, direct=True)
@@ -97,15 +103,15 @@ class AOS:
             res = self.skill_write(p["op"], args.pop("name"), args, direct=True)
         else:
             raise AosError(f"unknown proposal kind {p.get('kind')!r}")
-        inbox.discard(self.repo, pid)
+        inbox.discard(self.data, pid)
         return {**res, "applied": True}
 
     def reject_proposal(self, pid: str) -> None:
-        inbox.discard(self.repo, pid)
+        inbox.discard(self.data, pid)
 
     # -- projects ------------------------------------------------------------
     def _projects_file(self) -> Path:
-        return self.repo / "projects.yaml"
+        return self.data / "projects.yaml"
 
     def projects(self) -> dict:
         data = yaml.safe_load(read_text(self._projects_file())) or {}
