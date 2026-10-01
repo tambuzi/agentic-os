@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_seed_skills_valid():
     names = [s["name"] for s in skills.list_skills(ROOT)]
-    assert {"aos-memory", "aos-onboard-project"} <= set(names)
+    assert {"aos-memory", "aos-onboard-project", "aos-plan-feature"} <= set(names)
     for n in names:
         skills.validate(n, (ROOT / "skills" / n / "SKILL.md").read_text())
 

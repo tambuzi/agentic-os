@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shlex
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ from pathlib import Path
 import yaml
 
 from . import inbox
+from .board import Board
 from .config import aos_home, data_root, load_user_config, repo_root, save_user_config, slug_for_path
 from .core import AOS
 from .errors import AosError
@@ -92,7 +94,7 @@ def cmd_context(a) -> int:
 
 def cmd_serve(a) -> int:
     from .mcp_server import run_server
-    run_server(a.project)
+    run_server(a.project, a.task)
     return 0
 
 
@@ -148,7 +150,162 @@ def cmd_doctor(a) -> int:
     for slug, info in sorted(cfg["projects"].items()):
         p = Path(info["path"])
         line((p / ".aos/manifest.json").exists(), f"project {slug}: {p}")
+    line(shutil.which("claude") is not None,
+         "claude CLI (board workers)" if shutil.which("claude") else "claude CLI not found (needed for claude workers)")
+    kiro_cli = shutil.which("kiro-cli")
+    line(bool(kiro_cli), "kiro-cli (board workers)" if kiro_cli else "kiro-cli not found (needed only for kiro workers)")
+    if kiro_cli:
+        line(bool(os.environ.get("KIRO_API_KEY")), "KIRO_API_KEY set" if os.environ.get("KIRO_API_KEY")
+             else "KIRO_API_KEY not set (headless Kiro needs it unless you are logged in)")
     return 0
+
+
+def _board_ctx():
+    aos = AOS(repo_root())
+    return aos, Board(aos.data, aos.settings["board"]["max_tasks_per_feature"])
+
+
+def _check_projects(aos: AOS, names: list[str]) -> None:
+    known = aos.projects()
+    missing = [n for n in names if n not in known]
+    if missing:
+        raise AosError(f"unknown project(s): {', '.join(missing)}", "link them first with aos link")
+
+
+def cmd_feature(a) -> int:
+    aos, board = _board_ctx()
+    if a.action == "new":
+        projects = [p.strip() for p in (a.projects or "").split(",") if p.strip()]
+        _check_projects(aos, projects)
+        brief = f"# {a.title}\n\n## Goal\n\n## Projects\n" + "".join(f"- {p}\n" for p in projects)
+        contract = "# Contract\n\nAPIs, events and schemas shared between the projects.\n"
+        board.create_feature(a.slug, a.title, brief, contract)
+        d = board.feature_dir(a.slug)
+        print(f"feature {a.slug} created\n  edit: {d / 'brief.md'}\n  edit: {d / 'contract.md'}")
+        print(f"then: aos task add {a.slug} <project> \"<title>\" [--after ids]   or use the aos-plan-feature skill")
+    elif a.action == "list":
+        for f in board.features():
+            n = len(board.tasks(feature=f["slug"]))
+            print(f"{f['slug']:<24} {f['status']:<10} contract v{f['contract_version']}  {n} task(s)  {f['title']}")
+    elif a.action == "show":
+        f = board.feature(a.slug)
+        print(f"# {f['slug']}: {f['title']} [{f['status']}]\n")
+        print(board.brief(a.slug).strip() or "(no brief)")
+        c = board.contract(a.slug)
+        print(f"\n## Contract v{c['version']}\n\n{c['text'].strip() or '(empty)'}\n")
+        for t in board.tasks(feature=a.slug):
+            print(f"#{t['id']:<4} {t['project']:<14} {t['status']:<10} {t['title']}")
+        for p in board.proposals(a.slug, "pending"):
+            print(f"\nproposal #{p['id']} (task #{p['task']}): {p['reason']}\n{p['body']}")
+    elif a.action == "approve":
+        new = None
+        if a.edit:
+            p = next((x for x in board.proposals(status="pending") if x["id"] == a.id), None)
+            if not p:
+                raise AosError(f"no pending proposal #{a.id}")
+            contract = board.contract(p["feature"])
+            draft = (f"{contract['text'].rstrip()}\n\n## Change v{contract['version'] + 1} "
+                     f"(proposal #{p['id']})\n\n{p['body']}\n")
+            tmp = board.data / f".proposal-{a.id}.md"
+            tmp.write_text(draft)
+            try:
+                code = subprocess.call([*shlex.split(os.environ.get("EDITOR") or "vi"), str(tmp)])
+                new = tmp.read_text()
+            finally:
+                tmp.unlink(missing_ok=True)
+            if code != 0:
+                raise AosError(f"editor exited with code {code}; proposal not approved")
+            if not new.strip():
+                raise AosError("edited contract is empty; proposal not approved")
+        r = board.approve(a.id, new_contract=new)
+        print(f"approved #{a.id}: contract is now v{r['contract_version']}")
+    elif a.action == "reject":
+        board.reject(a.id, a.reason or "")
+        print(f"rejected #{a.id}")
+    else:
+        board.set_feature_status(a.slug, "done" if a.action == "done" else "cancelled")
+        print(f"feature {a.slug} {a.action}")
+    return 0
+
+
+def cmd_task(a) -> int:
+    from .workers.common import profile_settings, resolve_profile
+    aos, board = _board_ctx()
+    if a.action == "add":
+        _check_projects(aos, [a.project])
+        profile = resolve_profile(aos, a.project, a.worker)
+        attempts = profile_settings(aos, profile, a.project)["max_attempts"]
+        spec = Path(a.spec_file).read_text() if a.spec_file else ""
+        deps = a.after or []
+        tid = board.add_task(a.feature, a.project, a.title, spec, deps, worker=profile, max_attempts=attempts)
+        print(f"task #{tid} added ({a.project}, worker {profile})")
+    elif a.action == "list":
+        for t in board.tasks(feature=a.feature, status=a.status):
+            print(f"#{t['id']:<4} {t['feature']:<18} {t['project']:<14} {t['status']:<10} {t['worker']:<7} {t['title']}")
+    elif a.action == "show":
+        t = board.task(a.id)
+        print(yaml.safe_dump({k: t[k] for k in ("id", "feature", "project", "title", "status", "worker",
+                                                 "attempts", "max_attempts", "depends_on", "result", "note")},
+                             sort_keys=False, allow_unicode=True), end="")
+        if t["spec"]:
+            print(f"spec:\n{t['spec']}")
+        if a.log:
+            logs = sorted((board.data / "logs").glob(f"{t['id']}-*.log"), key=lambda p: p.stat().st_mtime)
+            if logs:
+                print(f"--- {logs[-1]} (last 60 lines)")
+                print("\n".join(logs[-1].read_text(errors="replace").splitlines()[-60:]))
+            else:
+                print("(no log yet)")
+    elif a.action == "retry":
+        board.retry(a.id, note=a.note, worker=a.worker, resume=a.resume)
+        print(f"task #{a.id} queued again")
+    elif a.action == "cancel":
+        board.cancel(a.id)
+        print(f"task #{a.id} cancelled")
+    else:
+        board.unblock(a.id, a.note or "")
+        print(f"task #{a.id} unblocked")
+    return 0
+
+
+def cmd_board(a) -> int:
+    if a.action == "run":
+        from .dispatcher import Dispatcher
+        repo = repo_root()
+        print("dispatching (Ctrl-C to stop launching; twice to stop workers)" if not a.once else "dispatching once")
+        Dispatcher(repo, feature=a.feature, parallel=a.parallel).run(once=a.once)
+        return 0
+    _, board = _board_ctx()
+    stuck = board.stuck()
+    for f in board.features():
+        if a.feature and f["slug"] != a.feature:
+            continue
+        print(f"{f['slug']} [{f['status']}] contract v{f['contract_version']}: {f['title']}")
+        for t in board.tasks(feature=f["slug"]):
+            extra = ""
+            if t["id"] in stuck:
+                extra = "  waiting on failed/cancelled " + ", ".join(f"#{d}" for d in stuck[t["id"]])
+            elif t["status"] == "blocked":
+                blk = [e for e in board.events(f["slug"]) if e["task"] == t["id"] and e["kind"] == "blocker"]
+                extra = f"  {blk[-1]['body'][:80]}" if blk else ""
+            print(f"  #{t['id']:<4} {t['project']:<14} {t['status']:<10} {t['attempts']}/{t['max_attempts']}  {t['title']}{extra}")
+        for p in board.proposals(f["slug"], "pending"):
+            print(f"  proposal #{p['id']} pending: {p['reason']}  (aos feature approve|reject {p['id']})")
+    return 0
+
+
+def _positive_int(value: str) -> int:
+    n = int(value)
+    if n < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return n
+
+
+def _id_list(value: str) -> list[int]:
+    try:
+        return [int(x) for x in value.split(",") if x.strip()]
+    except ValueError:
+        raise argparse.ArgumentTypeError("comma-separated task ids, e.g. 1,2")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -174,11 +331,14 @@ def _parser() -> argparse.ArgumentParser:
         s.add_argument("project", nargs="?", default=".")
         s.set_defaults(fn=fn)
 
-    for name, fn, text in (("context", cmd_context, "print session context (SessionStart hook)"),
-                           ("serve", cmd_serve, "run the MCP server over stdio")):
-        s = sub.add_parser(name, help=text)
-        s.add_argument("--project", default=".")
-        s.set_defaults(fn=fn)
+    s = sub.add_parser("context", help="print session context (SessionStart hook)")
+    s.add_argument("--project", default=".")
+    s.set_defaults(fn=cmd_context)
+
+    s = sub.add_parser("serve", help="run the MCP server over stdio")
+    s.add_argument("--project", default=".")
+    s.add_argument("--task", type=int, help="board worker mode for this task id")
+    s.set_defaults(fn=cmd_serve)
 
     s = sub.add_parser("inbox", help="review staged memory/skill proposals")
     isub = s.add_subparsers(dest="action", required=True)
@@ -187,6 +347,55 @@ def _parser() -> argparse.ArgumentParser:
         isub.add_parser(action).add_argument("id")
     s.set_defaults(fn=cmd_inbox)
 
+    s = sub.add_parser("feature", help="multi-project features")
+    fsub = s.add_subparsers(dest="action", required=True)
+    f = fsub.add_parser("new")
+    f.add_argument("slug")
+    f.add_argument("--title", required=True)
+    f.add_argument("--projects", help="comma-separated linked project slugs")
+    fsub.add_parser("list")
+    for name in ("show", "done", "cancel"):
+        fsub.add_parser(name).add_argument("slug")
+    f = fsub.add_parser("approve")
+    f.add_argument("id", type=int)
+    f.add_argument("--edit", action="store_true", help="edit the new contract in $EDITOR")
+    f = fsub.add_parser("reject")
+    f.add_argument("id", type=int)
+    f.add_argument("--reason")
+    s.set_defaults(fn=cmd_feature)
+
+    s = sub.add_parser("task", help="board tasks")
+    tsub = s.add_subparsers(dest="action", required=True)
+    t = tsub.add_parser("add")
+    t.add_argument("feature")
+    t.add_argument("project")
+    t.add_argument("title")
+    t.add_argument("--spec-file")
+    t.add_argument("--after", type=_id_list, help="comma-separated task ids this task waits for")
+    t.add_argument("--worker", choices=None, help="worker profile (claude, kiro, ...)")
+    t = tsub.add_parser("list")
+    t.add_argument("--feature")
+    t.add_argument("--status")
+    t = tsub.add_parser("show")
+    t.add_argument("id", type=int)
+    t.add_argument("--log", action="store_true")
+    t = tsub.add_parser("retry")
+    t.add_argument("id", type=int)
+    t.add_argument("--resume", action="store_true")
+    t.add_argument("--note")
+    t.add_argument("--worker")
+    tsub.add_parser("cancel").add_argument("id", type=int)
+    t = tsub.add_parser("unblock")
+    t.add_argument("id", type=int)
+    t.add_argument("--note")
+    s.set_defaults(fn=cmd_task)
+
+    s = sub.add_parser("board", help="board status, or `board run` to dispatch workers")
+    s.add_argument("action", nargs="?", choices=["run"])
+    s.add_argument("--feature")
+    s.add_argument("--parallel", type=_positive_int)
+    s.add_argument("--once", action="store_true")
+    s.set_defaults(fn=cmd_board)
     sub.add_parser("status", help="uncommitted agenticOS changes").set_defaults(fn=cmd_status)
     sub.add_parser("doctor", help="check installation").set_defaults(fn=cmd_doctor)
     return p

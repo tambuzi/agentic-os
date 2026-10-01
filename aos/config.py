@@ -21,6 +21,17 @@ DEFAULTS = {
     },
     "skills": {"mode": "direct"},
     "context": {"max_chars": 16000},
+    "board": {"parallel": 3, "max_tasks_per_feature": 30, "default_worker": "claude"},
+    "workers": {
+        "common": {
+            "timeout_min": 45,
+            "max_attempts": 2,
+            "allowed_tools": ["read", "write", "shell:git status", "shell:git diff", "shell:git log",
+                              "shell:git add", "shell:git commit", "mcp:aos", "mcp:graphskill"],
+        },
+        "claude": {"model": "sonnet"},
+        "kiro": {"model": None},
+    },
 }
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -94,9 +105,9 @@ def default_slug(path: str | Path) -> str:
     return s or "project"
 
 
-def check_slug(slug: str) -> None:
+def check_slug(slug: str, kind: str = "project") -> None:
     if not SLUG_RE.match(slug or ""):
-        raise AosError(f"invalid project slug {slug!r}", "lowercase a-z, 0-9 and '-', max 64 chars")
+        raise AosError(f"invalid {kind} slug {slug!r}", "lowercase a-z, 0-9 and '-', max 64 chars")
 
 
 def graphskill_cmd(cfg: dict | None = None) -> list[str] | None:

@@ -61,3 +61,22 @@ def make_skill(repo):
         return d
 
     return _make
+
+
+@pytest.fixture
+def git_repo(monkeypatch):
+    """Factory: a git repo on branch main with one commit."""
+    import subprocess
+    for k, v in {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                 "GIT_COMMITTER_EMAIL": "t@t"}.items():
+        monkeypatch.setenv(k, v)
+
+    def _make(path: Path) -> Path:
+        path.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, check=True)
+        (path / "README.md").write_text("hi\n")
+        subprocess.run(["git", "add", "."], cwd=path, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=path, check=True)
+        return path
+
+    return _make

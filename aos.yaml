@@ -7,3 +7,15 @@ skills:
   mode: direct
 context:
   max_chars: 16000
+board:
+  parallel: 3                 # workers running at the same time
+  max_tasks_per_feature: 30
+  default_worker: claude      # claude | kiro (per project: projects.yaml worker.profile)
+workers:
+  common:
+    timeout_min: 45
+    max_attempts: 2
+    allowed_tools: [read, write, "shell:git status", "shell:git diff", "shell:git log",
+                    "shell:git add", "shell:git commit", "mcp:aos", "mcp:graphskill"]
+  claude: {model: sonnet}
+  kiro:   {model: null}       # null = Kiro's default model
