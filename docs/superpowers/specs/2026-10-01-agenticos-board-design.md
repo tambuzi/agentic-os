@@ -16,7 +16,8 @@ Builds on: `2026-10-01-agenticos-design.md` (core). Replaces sub-project 4's "ta
 - The orchestrator launches workers. You don't open the sessions yourself.
 - Each worker works in an isolated git worktree on `feature/<slug>`, commits with tests, and stops. Nothing is pushed.
 - Contract changes are proposed by workers and approved or rejected by a human. Workers keep working on the parts the change doesn't affect.
-- All board data is local (`~/.agenticos/data`), like the rest of agenticOS business data.
+- All board data is local (`~/.agenticos/data`), like the rest of agenticOS business data. `board.db` is a plain SQLite **file**, not a database server: every `aos` process opens it directly.
+- **Workers must run on Claude Code and on Kiro.** Each task runs on one worker profile (`claude` or `kiro`), chosen per task, per project, or by default.
 
 **Success criteria:**
 - `aos feature new` plus planning produce a brief, a contract and tasks across ≥2 projects with dependencies.
@@ -26,7 +27,6 @@ Builds on: `2026-10-01-agenticos-design.md` (core). Replaces sub-project 4's "ta
 - A crashed or timed-out worker is retried up to a limit, then left `failed` for a human.
 
 **Out of scope (v1):**
-- Kiro worker profile. Kiro users can still open the worktrees.
 - Pushing or opening PRs.
 - A background daemon, cron, or a web dashboard.
 - Merging worktrees.
@@ -41,7 +41,7 @@ Builds on: `2026-10-01-agenticos-design.md` (core). Replaces sub-project 4's "ta
 | **Dependency** | Task B waits until task A is `done`. A's result summary is passed to B. |
 | **Event** | An entry on the feature timeline: comment, status change, blocker, proposal, decision, result. |
 | **Proposal** | A requested contract change, decided by a human. |
-| **Worker** | A headless agent process that runs one task attempt. Configured by a **profile** (`claude` in v1). |
+| **Worker** | A headless agent process that runs one task attempt. It uses a **profile**: `claude` (Claude Code `claude -p`) or `kiro` (`kiro-cli chat --no-interactive`). |
 | **Worktree** | `~/.agenticos/worktrees/<feature>/<project>`, branch `feature/<feature>`. One per feature and project, shared by that project's tasks sequentially. |
 
 ## 3. Data (local, `$AOS_DATA` = `~/.agenticos/data`)
@@ -62,6 +62,7 @@ features(slug TEXT PK, title TEXT, status TEXT,          -- open | done | cancel
          contract_version INT DEFAULT 1, created TEXT)
 tasks(id INTEGER PK, feature TEXT, project TEXT, title TEXT, spec TEXT,
       status TEXT,                                       -- see §4
+      worker TEXT,                                       -- profile: claude | kiro (resolved at creation, see §6)
       attempts INT DEFAULT 0, max_attempts INT,
       contract_seen INT,                                 -- version the current attempt started with / last re-read
       result TEXT, session_id TEXT, pid INT,
@@ -111,51 +112,105 @@ Other rules:
 
 ## 6. Workers
 
-Profiles live in `aos.yaml`. Per-project additions come from the local `projects.yaml` (`projects.<slug>.worker.allowed_tools`).
+Both tools get the same inputs. Only the launch mechanics differ, so each profile is a small adapter module with one function:
+`prepare(task, ctx) -> Launch(argv, cwd, env, session_hint, cleanup)`.
 
-```yaml
-workers:
-  claude:
-    command: ["claude", "-p", "{prompt}",
-              "--append-system-prompt", "{context}",
-              "--mcp-config", "{mcp_config}", "--strict-mcp-config",
-              "--permission-mode", "acceptEdits",
-              "--allowedTools", "{allowed_tools}",
-              "--session-id", "{session_id}",
-              "--model", "{model}"]
-    model: sonnet
-    timeout_min: 45
-    max_attempts: 2
-    allowed_tools: ["Read", "Edit", "Write", "Glob", "Grep",
-                    "Bash(git status:*)", "Bash(git diff:*)", "Bash(git add:*)", "Bash(git commit:*)",
-                    "mcp__aos", "mcp__graphskill"]
-board:
-  parallel: 3
-  max_tasks_per_feature: 30
-```
+**Profile choice**, first match wins:
+1. `aos task add --worker kiro|claude`;
+2. `projects.<slug>.worker.profile` in the local `projects.yaml`;
+3. `board.default_worker` in `aos.yaml` (default `claude`).
 
-- The command is a template. Placeholders are substituted per argument, never through a shell. Tests swap in a fake worker command.
-- `bypassPermissions` is never used. Project test commands are added per project, e.g. `Bash(npm test:*)`.
-- **cwd** is the worktree.
-- **`{context}`** (general plus specific) contains:
+The choice is stored on the task, and `aos task retry --worker X` can switch it.
+
+### 6.1 Shared inputs (built by `aos/workers/common.py`)
+- **cwd:** the worktree.
+- **context:** written to `data/runs/<task>-<attempt>/context.md`. It contains:
   - `aos context` for that project: SOUL, AGENTS, protocol, memories;
   - the **worker protocol** (below);
   - the feature brief and the current contract, with its version;
-  - the task spec, and the `result` of each dependency;
+  - the task spec and the `result` of each dependency;
   - the last 30 feature events.
-- **`{prompt}`** is the instruction: "Do task #N: <title>. Follow the worker protocol."
-- **`{mcp_config}`** is a temp JSON file with two servers:
-  - `aos`, run as `aos serve --project <project path> --task <id>`;
+- **prompt:** "Do task #N: <title>. Follow the worker protocol." On resume, your note is used instead.
+- **MCP servers:**
+  - `aos`, run as `<aos> serve --project <project path> --task <id>`;
   - `graphskill`, copied from the project's `.mcp.json` if present.
+- **Allowed tools** come from the profile config plus `projects.<slug>.worker.allowed_tools`. They are written in a neutral form:
+  - `read`, `write`;
+  - `shell:<command prefix>`, e.g. `shell:npm test`, `shell:git commit`;
+  - `mcp:<server>`.
 
-**Worker protocol** (in context):
+  Each adapter translates them to its tool's syntax. Neither adapter ever enables "trust/bypass everything".
+
+### 6.2 `claude` adapter (`aos/workers/claude.py`)
+```
+claude -p <prompt>
+  --append-system-prompt-file <run>/context.md
+  --mcp-config <run>/mcp.json --strict-mcp-config
+  --permission-mode acceptEdits
+  --allowedTools Read Edit Write Glob Grep "Bash(npm test:*)" mcp__aos mcp__graphskill ...
+  --session-id <uuid>            # pre-assigned; resume = --resume <uuid>
+  --model <model>
+```
+Translation: `read` → `Read Glob Grep`, `write` → `Edit Write`, `shell:X` → `Bash(X:*)`, `mcp:S` → `mcp__S`.
+
+### 6.3 `kiro` adapter (`aos/workers/kiro.py`)
+Kiro takes its per-run configuration from an **agent file**, so the adapter writes one per attempt:
+
+`~/.kiro/agents/aos-<feature>-t<id>.json`. It is user-level, so nothing is written into the worktree, and it is deleted by `cleanup` after the run.
+```json
+{
+  "name": "aos-<feature>-t<id>",
+  "description": "agenticOS worker for task <id>",
+  "prompt": "file://<run>/context.md",
+  "mcpServers": { "aos": {...}, "graphskill": {...} },
+  "includeMcpJson": false,
+  "tools": ["read", "write", "shell", "@aos", "@graphskill"],
+  "allowedTools": ["read", "write", "@aos", "@graphskill"],
+  "permissions": { "...": "shell allow-list from shell:<prefix> entries" },
+  "model": "<model>"
+}
+```
+```
+kiro-cli chat --no-interactive --agent aos-<feature>-t<id> --require-mcp-startup <prompt>
+```
+- **Resume:** Kiro can't pre-assign a session id. Sessions are stored per directory, and each worktree runs one task at a time, so `aos task retry --resume` uses `kiro-cli chat --no-interactive --resume …` in that worktree. The adapter records the latest id from `kiro-cli chat --list-sessions` after each run when it can.
+- **Auth:** headless Kiro needs `KIRO_API_KEY` (Kiro Pro and above) or an existing login. `aos doctor` reports whether `kiro-cli` is installed and authenticated.
+- **Shell allow-list:** the exact rule syntax of the `permissions` field is checked against Kiro's current docs during implementation, and covered by a golden test of the generated agent file. If a rule cannot be expressed, the adapter leaves that command out (the worker is then prompted and fails safely) rather than trusting all shell commands.
+- **Exit code:** `--require-mcp-startup` exits with code 3 if the MCP servers fail to start. That is recorded as a failed attempt with the reason "MCP startup failed".
+
+### 6.4 `command` adapter (tests and custom tools)
+A generic argv template with `{prompt}`, `{context_file}`, `{mcp_config}`, `{task_id}` placeholders, substituted per argument and never through a shell. Tests use it with a fake worker script. It also lets you plug in another agent CLI later.
+
+### 6.5 Profile config (`aos.yaml`)
+```yaml
+board:
+  parallel: 3
+  max_tasks_per_feature: 30
+  default_worker: claude
+workers:
+  common:
+    timeout_min: 45
+    max_attempts: 2
+    allowed_tools: [read, write, "shell:git status", "shell:git diff", "shell:git add",
+                    "shell:git commit", "mcp:aos", "mcp:graphskill"]
+  claude: {model: sonnet}
+  kiro:   {model: null}            # null = Kiro's default
+```
+Per project (local `projects.yaml`):
+```yaml
+projects:
+  shop-api:
+    worker: {profile: kiro, allowed_tools: ["shell:npm test", "shell:npm run lint"]}
+```
+
+### 6.6 Worker protocol (in context, identical for both tools)
 1. Call `task_show` first.
 2. Call `board_read` before each step and before finishing.
 3. Work only inside this worktree. Commit with tests on the current branch. Never push.
 4. If the contract must change, call `task_propose_contract` and continue with the parts the change doesn't affect. If nothing is left to do, call `task_block`.
 5. Finish with `task_complete(summary)`: what changed, commits, how it was tested, anything the dependent tasks need to know.
 
-**Resume:** `aos task retry <id> [--resume] [--note "..."]`. With `--resume`, the worker uses `--resume <session_id>` and the note becomes the prompt. This is how you give feedback after reviewing.
+**Resume:** `aos task retry <id> [--resume] [--note "..."] [--worker claude|kiro]` gives feedback after review. `--resume` cannot be combined with switching tools.
 
 ## 7. MCP tools (added to the `aos` server)
 
@@ -191,9 +246,9 @@ aos feature approve <proposal-id> [--edit]   # writes contract v+1 (proposal bod
                                              #   or opens $EDITOR with --edit), event 'contract', bumps version
 aos feature reject <proposal-id> [--reason "..."]
 aos feature done|cancel <slug>
-aos task add <feature> <project> "<title>" [--spec-file f] [--after 3,4]
+aos task add <feature> <project> "<title>" [--spec-file f] [--after 3,4] [--worker claude|kiro]
 aos task list [--feature F] [--status S] | show <id> [--log]
-aos task retry <id> [--resume] [--note "..."] | cancel <id> | unblock <id> [--note "..."]
+aos task retry <id> [--resume] [--note "..."] [--worker claude|kiro] | cancel <id> | unblock <id> [--note "..."]
 aos board [--feature F]                       # table: feature, task, project, status, attempts, blockers, pending proposals
 aos board run [--feature F] [--parallel N] [--once]
 ```
@@ -228,6 +283,11 @@ This runs in an interactive Claude Code or Kiro session with the `aos` server in
   - proposals approve and reject (file versions);
   - follow-up task limits.
   All against a temp `AOS_HOME`.
+- **Adapters:**
+  - golden tests of the generated `claude` argv and the Kiro agent JSON plus argv, from the same task;
+  - allow-list translation for both;
+  - the Kiro agent file is deleted after the run;
+  - Kiro exit code 3 is recorded as "MCP startup failed".
 - **Dispatcher**, with a fake worker (a small Python script, run as the profile command, that calls `aos` over MCP or the CLI to complete, block, or crash):
   - parallel cap;
   - one task per worktree;
@@ -237,7 +297,7 @@ This runs in an interactive Claude Code or Kiro session with the `aos` server in
   - the `--once` exit.
 - **Worktrees:** temp git repos. Creation, reuse, refusal for a non-git project, and the user's checkout staying untouched.
 - **MCP:** worker-mode and planner-mode tool round-trips, plus the server registering the right tool set.
-- **Manual verification:** one real run with two scratch git projects, a real `claude` worker for each, and a dependency between them.
+- **Manual verification:** one real run with two scratch git projects and a dependency between them, one task on `claude` and one on `kiro`. The Kiro half needs `kiro-cli` installed and authenticated on the machine; until then it is covered only by the fake-binary tests.
 
 ## 12. Module layout
 
@@ -245,7 +305,10 @@ This runs in an interactive Claude Code or Kiro session with the `aos` server in
 |---|---|
 | `aos/board.py` | schema, migrations, all state transitions, events, proposals, contract files |
 | `aos/worktrees.py` | ensure/reuse/validate git worktrees |
-| `aos/workers.py` | profile resolution, context and prompt building, MCP config file, command rendering |
+| `aos/workers/common.py` | profile resolution, shared context and prompt, MCP server set, neutral allow-list |
+| `aos/workers/claude.py` | Claude Code adapter |
+| `aos/workers/kiro.py` | Kiro adapter (agent file, resume, exit codes) |
+| `aos/workers/command.py` | generic template adapter (tests, other CLIs) |
 | `aos/dispatcher.py` | the loop: reap, promote, pick, prepare, launch; lock; signals |
 | `aos/mcp_server.py` | adds the board tools (worker mode when `--task` is given) |
 | `aos/cli.py` | adds `feature`, `task`, `board` commands |
