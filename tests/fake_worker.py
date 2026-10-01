@@ -21,6 +21,15 @@ if mode == "sleep":
 if mode == "block":
     board.block(tid, "fake blocker", author=f"task:{tid}")
     sys.exit(0)
+if mode == "complete_then_sleep":
+    board.mark_seen(tid)
+    board.complete(tid, "done, still wrapping up", author=f"task:{tid}")
+    time.sleep(float(os.environ.get("FAKE_SLEEP", "30")))
+    sys.exit(0)
+if mode == "block_then_sleep":
+    board.block(tid, "fake blocker", author=f"task:{tid}")
+    time.sleep(float(os.environ.get("FAKE_SLEEP", "30")))
+    sys.exit(0)
 if mode == "write":
     (Path.cwd() / f"t{tid}.txt").write_text("work\n")
 board.mark_seen(tid)

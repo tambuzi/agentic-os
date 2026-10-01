@@ -30,7 +30,7 @@ def translate(allowed: list[str]) -> list[str]:
 
 def prepare(spec: RunSpec, settings: dict) -> Launch:
     mcp = write_mcp_config(spec)
-    argv = [settings.get("bin") or "claude", "-p", spec.prompt,
+    argv = [settings.get("bin") or "claude", "-p",
             "--append-system-prompt", read_text(spec.context_file),
             "--mcp-config", str(mcp), "--strict-mcp-config",
             "--permission-mode", "acceptEdits"]
@@ -42,5 +42,6 @@ def prepare(spec: RunSpec, settings: dict) -> Launch:
     else:
         session = str(uuid.uuid4())
         argv += ["--session-id", session]
-    argv += ["--allowedTools", *translate(spec.allowed)]
+    # prompt last, after "--", so a note starting with "-" is never read as a flag
+    argv += ["--allowedTools", *translate(spec.allowed), "--", spec.prompt]
     return Launch(argv=argv, cwd=spec.worktree, env=dict(os.environ), session_id=session)

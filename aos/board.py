@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS tasks(
   id INTEGER PRIMARY KEY AUTOINCREMENT, feature TEXT NOT NULL, project TEXT NOT NULL,
   title TEXT NOT NULL, spec TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'todo',
   worker TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL,
-  contract_seen INTEGER, result TEXT, session_id TEXT, pid INTEGER, note TEXT,
+  contract_seen INTEGER, result TEXT, session_id TEXT, pid INTEGER, proc_start TEXT, note TEXT,
   resume INTEGER NOT NULL DEFAULT 0, started TEXT, updated TEXT NOT NULL, created_by TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS deps(task INTEGER NOT NULL, depends_on INTEGER NOT NULL,
   PRIMARY KEY(task, depends_on));
@@ -71,6 +71,9 @@ class Board:
         c.execute("PRAGMA busy_timeout=5000")
         c.execute("PRAGMA journal_mode=WAL")
         c.executescript(SCHEMA)
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(tasks)")}
+        if "proc_start" not in cols:  # boards created before proc_start existed
+            c.execute("ALTER TABLE tasks ADD COLUMN proc_start TEXT")
         return c
 
     @contextmanager
@@ -150,6 +153,10 @@ class Board:
         with self._tx() as c:
             c.execute("UPDATE features SET status=? WHERE slug=?", (status, slug))
             self._event(c, slug, None, "status", author, f"feature {status}")
+            if status == "cancelled":  # the dispatcher terminates any of these still running
+                for r in c.execute("SELECT id FROM tasks WHERE feature=? AND status NOT IN ('done','cancelled')",
+                                   (slug,)).fetchall():
+                    self._transition(c, r["id"], STATUSES, "cancelled", author, "feature cancelled")
 
     def brief(self, slug: str) -> str:
         self.feature(slug)
@@ -217,7 +224,8 @@ class Board:
     def promote(self) -> list[int]:
         with self._tx() as c:
             ids = [r[0] for r in c.execute(
-                "SELECT t.id FROM tasks t WHERE t.status='todo' AND NOT EXISTS ("
+                "SELECT t.id FROM tasks t JOIN features f ON f.slug=t.feature"
+                " WHERE t.status='todo' AND f.status='open' AND NOT EXISTS ("
                 " SELECT 1 FROM deps d JOIN tasks x ON x.id=d.depends_on"
                 " WHERE d.task=t.id AND x.status!='done') ORDER BY t.id")]
             for tid in ids:
@@ -225,13 +233,28 @@ class Board:
         return ids
 
     def stuck(self) -> dict[int, list[int]]:
-        """todo tasks that can never become ready because a dependency failed or was cancelled."""
+        """todo tasks that can never become ready: a dependency failed or was cancelled,
+        directly or further up the chain. Maps task id -> the dependencies in that dead set."""
         out: dict[int, list[int]] = {}
-        for r in self._rows("SELECT d.task, d.depends_on FROM deps d JOIN tasks t ON t.id=d.task "
-                            "JOIN tasks x ON x.id=d.depends_on WHERE t.status='todo' "
-                            "AND x.status IN ('failed','cancelled') ORDER BY d.task, d.depends_on"):
+        for r in self._rows(
+                "WITH RECURSIVE dead(id) AS ("
+                " SELECT id FROM tasks WHERE status IN ('failed','cancelled')"
+                " UNION SELECT d.task FROM deps d JOIN dead ON d.depends_on=dead.id"
+                " JOIN tasks t ON t.id=d.task WHERE t.status='todo')"
+                " SELECT d.task, d.depends_on FROM deps d JOIN tasks t ON t.id=d.task"
+                " WHERE t.status='todo' AND d.depends_on IN (SELECT id FROM dead)"
+                " ORDER BY d.task, d.depends_on"):
             out.setdefault(r["task"], []).append(r["depends_on"])
         return out
+
+    def dispatchable(self, feature: str | None = None) -> list[dict]:
+        """ready tasks of open features, oldest first."""
+        sql = ("SELECT t.* FROM tasks t JOIN features f ON f.slug=t.feature "
+               "WHERE t.status='ready' AND f.status='open'")
+        params: list = []
+        if feature:
+            sql, params = sql + " AND t.feature=?", [feature]
+        return self._rows(sql + " ORDER BY t.id", params)
 
     # -- events --------------------------------------------------------------
     def events(self, feature: str, since: int = 0, limit: int | None = None) -> list[dict]:
@@ -261,11 +284,12 @@ class Board:
                              started=now(), pid=None)
         return self.task(tid)
 
-    def set_process(self, tid: int, pid: int | None, session_id: str | None) -> None:
+    def set_process(self, tid: int, pid: int | None, session_id: str | None,
+                    proc_start: str | None = None) -> None:
         with self._tx() as c:
             self._task_row(c, tid)
-            c.execute("UPDATE tasks SET pid=?, session_id=COALESCE(?, session_id), updated=? WHERE id=?",
-                      (pid, session_id, now(), int(tid)))
+            c.execute("UPDATE tasks SET pid=?, proc_start=?, session_id=COALESCE(?, session_id), updated=? "
+                      "WHERE id=?", (pid, proc_start, session_id, now(), int(tid)))
 
     def mark_seen(self, tid: int) -> None:
         with self._tx() as c:

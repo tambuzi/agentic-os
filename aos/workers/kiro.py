@@ -33,7 +33,9 @@ def agent_config(spec: RunSpec, settings: dict) -> dict:
         if a in ("read", "write"):
             allowed.append(a)
         elif a.startswith("shell:"):
-            shell.append(rf"^{re.escape(a[6:])}(\s.*)?$")
+            # the prefix plus plain arguments only: no chaining, pipes, substitution,
+            # redirection or newlines, so `git status && curl …` is not allowed
+            shell.append(rf"^{re.escape(a[6:])}(?:[ \t]+[^;&|`$()<>\\\r\n]*)?$")
         elif a.startswith("mcp:"):
             if a[4:] in spec.mcp_servers:
                 tools.append(f"@{a[4:]}")
@@ -66,6 +68,6 @@ def prepare(spec: RunSpec, settings: dict) -> Launch:
             "--require-mcp-startup"]
     if spec.resume:
         argv.append("--resume")
-    argv.append(spec.prompt)
+    argv += ["--", spec.prompt]  # "--": a prompt starting with "-" is never read as a flag
     return Launch(argv=argv, cwd=spec.worktree, env=dict(os.environ), session_id=None,
                   cleanup=lambda: path.unlink(missing_ok=True))

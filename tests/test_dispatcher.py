@@ -159,3 +159,116 @@ def test_single_dispatcher_lock(env):
     with d1._lock():
         with pytest.raises(AosError, match="already running"):
             Dispatcher(repo, tick=0.05).run(once=True)
+
+
+def wait_for(cond, timeout=10.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_worker_outliving_complete_keeps_worktree_busy(env, monkeypatch):
+    repo, board, _, _ = env
+    monkeypatch.setenv("FAKE_MODE", "complete_then_sleep")
+    a = add(board, "api")
+    b = add(board, "api", deps=[a])
+    d = Dispatcher(repo, tick=0.05)
+    d.grace_s = 0.5
+    try:
+        d.tick()
+        assert wait_for(lambda: board.task(a)["status"] == "done")
+        d.tick()
+        assert list(d.running) == [a] and board.task(b)["status"] == "ready"
+        time.sleep(0.6)
+        d.tick()
+        assert a not in d.running
+        d.tick()
+        assert b in d.running
+    finally:
+        stop_all(d)
+
+
+def test_unblocked_task_not_relaunched_while_old_process_lives(env, monkeypatch):
+    repo, board, _, _ = env
+    monkeypatch.setenv("FAKE_MODE", "block_then_sleep")
+    t = add(board, "api")
+    d = Dispatcher(repo, tick=0.05)
+    d.grace_s = 60
+    try:
+        d.tick()
+        old = d.running[t].proc
+        assert wait_for(lambda: board.task(t)["status"] == "blocked")
+        board.unblock(t)
+        d.tick()
+        assert d.running[t].proc is old and old.poll() is None
+    finally:
+        stop_all(d)
+
+
+def test_cancel_during_launch_does_not_crash(env, monkeypatch):
+    repo, board, _, _ = env
+    t = add(board, "api")
+    import aos.dispatcher as disp
+    real = disp.ensure_worktree
+
+    def cancelling(*args, **kw):
+        board.cancel(t)
+        return real(*args, **kw)
+
+    monkeypatch.setattr(disp, "ensure_worktree", cancelling)
+    d = Dispatcher(repo, tick=0.05)
+    d.tick()
+    assert board.task(t)["status"] == "cancelled" and not d.running
+
+
+def test_closed_feature_tasks_not_dispatched(env):
+    repo, board, _, _ = env
+    t = add(board, "api")
+    board.set_feature_status("checkout", "cancelled")
+    assert board.task(t)["status"] == "cancelled"
+    board.create_feature("other", "Other")
+    u = board.add_task("other", "web", "u", worker="fake")
+    board.promote()
+    board.set_feature_status("other", "done")
+    d = Dispatcher(repo, tick=0.05)
+    d.tick()
+    assert not d.running and board.task(u)["status"] == "ready"
+
+
+def test_recover_never_signals_a_reused_pid(env):
+    repo, board, _, _ = env
+    t = add(board, "api")
+    board.promote()
+    board.claim(t)
+    stranger = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        board.set_process(t, stranger.pid, None, proc_start="Thu Jan  1 00:00:00 1970")
+        Dispatcher(repo, tick=0.05).recover()
+        assert stranger.poll() is None
+        assert board.task(t)["status"] == "ready"
+    finally:
+        stranger.kill()
+        stranger.wait()
+
+
+def test_recover_kills_own_orphan(env):
+    from aos.dispatcher import process_start
+    repo, board, _, _ = env
+    t = add(board, "api")
+    board.promote()
+    board.claim(t)
+    orphan = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    board.set_process(t, orphan.pid, None, proc_start=process_start(orphan.pid))
+    Dispatcher(repo, tick=0.05).recover()
+    assert orphan.wait(timeout=10) is not None
+
+
+def test_terminating_own_child_is_fast():
+    from aos.dispatcher import _kill_group
+    p = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    start = time.monotonic()
+    _kill_group(p.pid, proc=p)
+    assert p.poll() is not None and time.monotonic() - start < 1.5

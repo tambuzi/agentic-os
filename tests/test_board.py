@@ -156,3 +156,12 @@ def test_failed_attempts_retry_block_cancel(board):
     assert board.task(t)["resume"] == 1
     with pytest.raises(AosError):
         board.attempt_failed(t, "not running")
+
+
+def test_stuck_is_transitive(board):
+    feat(board)
+    a = board.add_task("checkout", "api", "a")
+    b = board.add_task("checkout", "web", "b", depends_on=[a])
+    c = board.add_task("checkout", "billing", "c", depends_on=[b])
+    board.cancel(a)
+    assert board.stuck() == {b: [a], c: [b]}
