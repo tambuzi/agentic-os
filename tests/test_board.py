@@ -86,3 +86,73 @@ def test_events_since_and_limit(board):
     last = evs[-3]["id"]
     assert [e["body"] for e in board.events("checkout", since=last)] == ["c3", "c4"]
     assert [e["body"] for e in board.events("checkout", limit=2)] == ["c3", "c4"]
+
+
+def test_claim_complete_and_contract_guard(board):
+    feat(board)
+    t = board.add_task("checkout", "web", "x")
+    board.promote()
+    assert board.claim(t)["attempts"] == 1
+    p = board.propose(t, "POST /orders returns 201", "need status code", author=f"task:{t}")
+    board.approve(p)
+    with pytest.raises(AosError) as e:
+        board.complete(t, "done", author="w")
+    assert "v1→v2" in e.value.message
+    board.mark_seen(t)
+    board.complete(t, "done", author="w")
+    assert board.task(t)["status"] == "done" and board.task(t)["result"] == "done"
+    assert board.events("checkout")[-1]["kind"] == "result"
+    with pytest.raises(AosError):
+        board.claim(t)
+
+
+def test_approve_versions_contract_files(board, data):
+    feat(board)
+    t = board.add_task("checkout", "web", "x")
+    p = board.propose(t, "Add field currency", "multi-currency", author="w")
+    assert board.proposals("checkout", "pending")[0]["id"] == p
+    assert board.approve(p) == {"proposal": p, "contract_version": 2}
+    c = board.contract("checkout")
+    assert c["version"] == 2 and "POST /orders" in c["text"] and "Add field currency" in c["text"]
+    assert (data / "features/checkout/contract.v1.md").read_text() == "<!-- aos contract v1 -->\nPOST /orders\n"
+    with pytest.raises(AosError):
+        board.approve(p)
+    p2 = board.propose(t, "Drop field", "nah", author="w")
+    board.reject(p2, "keep it")
+    assert board.proposals("checkout", "rejected")[0]["id"] == p2
+    p3 = board.propose(t, "x", "y", author="w")
+    assert board.approve(p3, new_contract="FULL REWRITE")["contract_version"] == 3
+    assert board.contract("checkout")["text"] == "FULL REWRITE\n"
+    kinds = [e["kind"] for e in board.events("checkout") if e["kind"] in ("proposal", "contract", "decision")]
+    assert kinds == ["proposal", "contract", "proposal", "decision", "proposal", "contract"]
+
+
+def test_failed_attempts_retry_block_cancel(board):
+    feat(board)
+    t = board.add_task("checkout", "web", "x", max_attempts=2)
+    board.promote()
+    board.claim(t)
+    board.set_process(t, 4242, "sess-1")
+    assert board.task(t)["pid"] == 4242 and board.task(t)["session_id"] == "sess-1"
+    board.attempt_failed(t, "crash")
+    assert board.task(t)["status"] == "ready" and board.task(t)["pid"] is None
+    board.claim(t)
+    board.attempt_failed(t, "crash again")
+    assert board.task(t)["status"] == "failed"
+    board.retry(t, note="try smaller steps")
+    task = board.task(t)
+    assert task["status"] == "ready" and task["attempts"] == 0 and task["note"] == "try smaller steps"
+    board.claim(t)
+    board.block(t, "needs API key", author="w")
+    assert board.task(t)["status"] == "blocked"
+    assert board.events("checkout")[-1]["kind"] == "blocker"
+    board.unblock(t, note="key is in vault")
+    assert board.task(t)["status"] == "ready" and board.task(t)["note"] == "key is in vault"
+    board.cancel(t)
+    assert board.task(t)["status"] == "cancelled"
+    with pytest.raises(AosError):
+        board.retry(t, resume=True, worker="kiro")
+    board.retry(t, resume=True)
+    assert board.task(t)["resume"] == 1
+    with pytest.raises(AosError):
+        board.attempt_failed(t, "not running")

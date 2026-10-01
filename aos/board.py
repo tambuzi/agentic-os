@@ -247,3 +247,132 @@ class Board:
         with self._tx() as c:
             t = self._task_row(c, tid)
             self._event(c, t["feature"], int(tid), "comment", author, text.strip())
+
+    # -- task transitions ----------------------------------------------------
+    def _version(self, c, feature: str) -> int:
+        return c.execute("SELECT contract_version FROM features WHERE slug=?", (feature,)).fetchone()[0]
+
+    def claim(self, tid: int) -> dict:
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            self._transition(c, tid, ("ready",), "running", "dispatcher",
+                             f"attempt {t['attempts'] + 1} started",
+                             attempts=t["attempts"] + 1, contract_seen=self._version(c, t["feature"]),
+                             started=now(), pid=None)
+        return self.task(tid)
+
+    def set_process(self, tid: int, pid: int | None, session_id: str | None) -> None:
+        with self._tx() as c:
+            self._task_row(c, tid)
+            c.execute("UPDATE tasks SET pid=?, session_id=COALESCE(?, session_id), updated=? WHERE id=?",
+                      (pid, session_id, now(), int(tid)))
+
+    def mark_seen(self, tid: int) -> None:
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            c.execute("UPDATE tasks SET contract_seen=? WHERE id=?", (self._version(c, t["feature"]), int(tid)))
+
+    def complete(self, tid: int, summary: str, author: str) -> None:
+        if not (summary or "").strip():
+            raise AosError("summary is empty", "say what changed, the commits, and how it was tested")
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            v = self._version(c, t["feature"])
+            if t["status"] == "running" and (t["contract_seen"] or 0) < v:
+                raise AosError(f"contract changed (v{t['contract_seen']}→v{v}) since you last read it",
+                               "call board_read or task_show, re-check your work against the new "
+                               "contract, then complete")
+            self._transition(c, tid, ("running",), "done", author,
+                             f"done: {summary.strip().splitlines()[0][:120]}",
+                             result=summary.strip(), pid=None, note=None, resume=0)
+            self._event(c, t["feature"], int(tid), "result", author, summary.strip())
+
+    def block(self, tid: int, reason: str, author: str) -> None:
+        if not (reason or "").strip():
+            raise AosError("block reason is empty")
+        with self._tx() as c:
+            t = self._transition(c, tid, ("todo", "ready", "running"), "blocked", author,
+                                 f"blocked: {reason.strip()[:120]}", pid=None)
+            self._event(c, t["feature"], int(tid), "blocker", author, reason.strip())
+
+    def unblock(self, tid: int, note: str = "", author: str = "human") -> None:
+        with self._tx() as c:
+            self._transition(c, tid, ("blocked",), "todo", author, "unblocked", note=note or None)
+        self.promote()
+
+    def attempt_failed(self, tid: int, reason: str) -> None:
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            to = "failed" if t["attempts"] >= t["max_attempts"] else "ready"
+            self._transition(c, tid, ("running",), to, "dispatcher",
+                             f"attempt {t['attempts']} failed: {reason} → {to}", pid=None)
+
+    def retry(self, tid: int, note: str | None = None, worker: str | None = None,
+              resume: bool = False, author: str = "human") -> None:
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            if resume and worker and worker != t["worker"]:
+                raise AosError("--resume cannot switch worker tools", "retry without --resume to switch")
+            self._transition(c, tid, ("failed", "blocked", "cancelled", "done", "ready"), "todo", author,
+                             "retry requested" + (" (resume)" if resume else ""),
+                             attempts=0, note=note, resume=1 if resume else 0,
+                             worker=worker or t["worker"], pid=None)
+        self.promote()
+
+    def cancel(self, tid: int, author: str = "human") -> None:
+        with self._tx() as c:
+            self._transition(c, tid, ("todo", "ready", "running", "blocked", "failed"), "cancelled",
+                             author, "cancelled")
+
+    # -- contract proposals --------------------------------------------------
+    def propose(self, tid: int, body: str, reason: str, author: str) -> int:
+        if not (body or "").strip():
+            raise AosError("proposal is empty")
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            cur = c.execute("INSERT INTO proposals(feature, task, body, reason, status) VALUES (?,?,?,?,?)",
+                            (t["feature"], int(tid), body.strip(), (reason or "").strip(), "pending"))
+            pid = cur.lastrowid
+            self._event(c, t["feature"], int(tid), "proposal", author,
+                        f"proposal #{pid}: {(reason or '').strip()}\n{body.strip()}")
+        return pid
+
+    def proposals(self, feature: str | None = None, status: str | None = None) -> list[dict]:
+        sql, params = "SELECT * FROM proposals WHERE 1=1", []
+        if feature:
+            sql, params = sql + " AND feature=?", params + [feature]
+        if status:
+            sql, params = sql + " AND status=?", params + [status]
+        return self._rows(sql + " ORDER BY id", params)
+
+    def _pending(self, c, pid: int):
+        p = c.execute("SELECT * FROM proposals WHERE id=?", (int(pid),)).fetchone()
+        if not p:
+            raise AosError(f"unknown proposal #{pid}", "aos feature show <slug>")
+        if p["status"] != "pending":
+            raise AosError(f"proposal #{pid} is already {p['status']}")
+        return p
+
+    def approve(self, pid: int, new_contract: str | None = None, author: str = "human") -> dict:
+        with self._tx() as c:
+            p = self._pending(c, pid)
+            v = self._version(c, p["feature"])
+            nv = v + 1
+            d = self.feature_dir(p["feature"])
+            old = read_text(d / "contract.md")
+            write_atomic(d / f"contract.v{v}.md", old)
+            body = new_contract if new_contract is not None else (
+                _contract_body(old).rstrip() + f"\n\n## Change v{nv} (proposal #{pid})\n\n{p['body']}\n")
+            write_atomic(d / "contract.md", _contract_file(nv, body))
+            c.execute("UPDATE features SET contract_version=? WHERE slug=?", (nv, p["feature"]))
+            c.execute("UPDATE proposals SET status='approved', decided=? WHERE id=?", (now(), int(pid)))
+            self._event(c, p["feature"], p["task"], "contract", author,
+                        f"contract v{nv}: proposal #{pid} approved. Re-read the contract.")
+        return {"proposal": int(pid), "contract_version": nv}
+
+    def reject(self, pid: int, reason: str = "", author: str = "human") -> None:
+        with self._tx() as c:
+            p = self._pending(c, pid)
+            c.execute("UPDATE proposals SET status='rejected', decided=? WHERE id=?", (now(), int(pid)))
+            self._event(c, p["feature"], p["task"], "decision", author,
+                        f"proposal #{pid} rejected" + (f": {reason}" if reason else ""))
