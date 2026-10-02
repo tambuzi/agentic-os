@@ -73,3 +73,82 @@ def test_tool_registration_by_mode(planner, worker):
     names = {t.name for t in asyncio.run(build_server(base, w).list_tools())}
     assert WORKER_TOOLS <= names and "feature_create" not in names
     assert len({t.name for t in asyncio.run(build_server(base).list_tools())}) == 11
+
+
+@pytest.fixture
+def started(configured, data, git_repo, tmp_path, monkeypatch):
+    import sys
+    from pathlib import Path
+    import yaml
+    from aos.config import load_user_config, save_user_config
+    root = Path(__file__).resolve().parents[1]
+    monkeypatch.setenv("PYTHONPATH", str(root))
+    (configured / "aos.yaml").write_text(yaml.safe_dump({
+        "board": {"default_worker": "fake"},
+        "workers": {"fake": {"adapter": "command", "timeout_min": 0.1,
+                             "command": [sys.executable, str(Path(__file__).parent / "fake_worker.py"), "{task_id}"]}}}))
+    projects = {}
+    for name in ("api", "web"):
+        projects[name] = {"path": str(git_repo(tmp_path / name)), "targets": ["claude"]}
+        AOS(configured).register_project(name)
+    save_user_config({**load_user_config(), "projects": projects})
+    bt = BoardTools(AOS(configured))
+    bt.feature_create("checkout", "Checkout")
+    return bt
+
+
+def wait_for(cond, timeout=20.0):
+    import time
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_board_start_runs_workers_in_background_until_done(started):
+    from aos.dispatcher import dispatcher_status
+    bt = started
+    assert "error" in bt.board_start("checkout")  # no tasks yet
+    a = bt.task_create("api", "a", feature="checkout")["task"]
+    bt.task_create("web", "b", feature="checkout", depends_on=[a])
+    r = bt.board_start("checkout")
+    assert r["started"] and r["pid"] > 0 and r["log"].endswith("dispatcher-checkout.log")
+    again = bt.board_start("checkout")
+    assert again["started"] is False and "already running" in again["message"]
+    assert wait_for(lambda: all(t["status"] == "done" for t in bt.board.tasks(feature="checkout")))
+    assert wait_for(lambda: not dispatcher_status(bt.board.data)["running"])
+    st = bt.board_status("checkout")
+    assert st["counts"] == {"done": 2} and st["dispatcher"]["running"] is False
+
+
+def test_board_start_refuses_when_another_feature_holds_the_dispatcher(started):
+    from aos.dispatcher import Dispatcher
+    bt = started
+    bt.feature_create("other", "Other")
+    bt.task_create("api", "x", feature="other")
+    bt.task_create("api", "y", feature="checkout")
+    with Dispatcher(bt.aos.repo, feature="checkout", tick=0.05)._lock():
+        r = bt.board_start("other")
+    assert "error" in r and "checkout" in r["error"]
+
+
+def test_board_status_reports_blockers_and_proposals(started):
+    bt = started
+    t = bt.task_create("api", "a", feature="checkout")["task"]
+    board = bt.board
+    board.promote()
+    board.claim(t)
+    board.propose(t, "add currency", "need it", author=f"task:{t}")
+    board.block(t, "missing credentials", author=f"task:{t}")
+    st = bt.board_status("checkout")
+    assert st["counts"] == {"blocked": 1}
+    assert st["blocked"] == [{"task": t, "project": "api", "reason": "missing credentials"}]
+    assert st["pending_proposals"][0]["body"] == "add currency"
+    assert st["tasks"][0]["title"] == "a"
+
+
+def test_planner_registers_start_and_status(planner):
+    names = {t.name for t in asyncio.run(build_server(Tools(planner.aos), planner).list_tools())}
+    assert {"board_start", "board_status"} <= names

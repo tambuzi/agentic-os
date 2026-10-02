@@ -340,3 +340,33 @@ def test_parallel_must_be_positive(env):
     repo, _, _, _ = env
     with pytest.raises(AosError):
         Dispatcher(repo, parallel=0)
+
+
+def test_until_done_exits_when_work_is_finished(env):
+    repo, board, _, _ = env
+    a = add(board, "api")
+    b = add(board, "web", deps=[a])
+    start = time.monotonic()
+    Dispatcher(repo, tick=0.05).run(until_done=True)
+    assert board.task(a)["status"] == "done" and board.task(b)["status"] == "done"
+    assert time.monotonic() - start < 20
+
+
+def test_until_done_exits_when_only_blocked_work_remains(env, monkeypatch):
+    repo, board, _, _ = env
+    monkeypatch.setenv("FAKE_MODE", "block")
+    a = add(board, "api")
+    add(board, "web", deps=[a])
+    Dispatcher(repo, tick=0.05).run(until_done=True)
+    assert board.task(a)["status"] == "blocked"
+
+
+def test_dispatcher_status_reports_lock_holder(env):
+    from aos.dispatcher import dispatcher_status
+    repo, board, _, _ = env
+    assert dispatcher_status(board.data) == {"running": False}
+    d = Dispatcher(repo, feature="checkout", tick=0.05)
+    with d._lock():
+        st = dispatcher_status(board.data)
+        assert st["running"] and st["feature"] == "checkout" and st["pid"] > 0
+    assert dispatcher_status(board.data) == {"running": False}
