@@ -64,3 +64,22 @@ def test_init_rejects_data_dir_inside_repo(repo, home, capsys):
     assert code == 1 and "outside" in err
     assert run(["init", str(repo), "--data-dir", str(home / "biz")], capsys)[0] == 0
     assert load_user_config()["data_dir"] == str((home / "biz").resolve())
+
+
+def test_doctor_checks_each_projects_graph(configured, tmp_path, capsys):
+    import json as _json
+    import sys as _sys
+    from pathlib import Path as _P
+    from aos.config import save_user_config as _save, load_user_config as _load
+    api, web = tmp_path / "api", tmp_path / "web"
+    api.mkdir()
+    web.mkdir()
+    fake = _P(__file__).parent / "fake_graph_server.py"
+    (api / ".mcp.json").write_text(_json.dumps({"mcpServers": {"graphskill": {
+        "command": _sys.executable, "args": [str(fake), "--root", str(api)]}}}))
+    _save({**_load(), "projects": {"api": {"path": str(api), "targets": ["claude"]},
+                                   "web": {"path": str(web), "targets": ["claude"]}}})
+    code, out, _ = run(["doctor"], capsys)
+    assert code == 0
+    assert any(l.startswith("ok") and "graphskill api" in l for l in out.splitlines())
+    assert any(l.startswith("warn") and "graphskill web" in l for l in out.splitlines())

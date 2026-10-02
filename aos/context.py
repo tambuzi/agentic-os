@@ -19,7 +19,7 @@ Skills (procedures, loaded on demand):
 
 Context:
 - Before asking the user about business context, call knowledge_search. For another project, use project_list and project_context.
-- For code questions use the graphskill tools (repo_map, search_symbols, callers, read_symbol_body) before grep or reading whole files."""
+- For code questions use the graphskill tools (repo_map, search_symbols, callers, read_symbol_body) before grep or reading whole files. For another linked project's code, use code_query(project, tool, arguments)."""
 
 TRUNC = "\n…[aos: context truncated]\n"
 

@@ -147,9 +147,18 @@ def cmd_doctor(a) -> int:
     cfg = load_user_config()
     gs = cfg.get("graphskill_cmd") or ([shutil.which("graphskill")] if shutil.which("graphskill") else None)
     line(bool(gs), f"graphskill: {' '.join(gs)}" if gs else "graphskill not found (aos init --graphskill '<cmd>')")
+    from . import codegraph
     for slug, info in sorted(cfg["projects"].items()):
         p = Path(info["path"])
         line((p / ".aos/manifest.json").exists(), f"project {slug}: {p}")
+        if not codegraph.graph_server(p):
+            line(False, f"graphskill {slug}: no graphskill server in .mcp.json (install graphskill, re-run aos link)")
+            continue
+        try:
+            n = len(codegraph.list_tools(p, timeout=30))
+            line(True, f"graphskill {slug}: {n} tools")
+        except AosError as e:
+            line(False, f"graphskill {slug}: {e.message}")
     line(shutil.which("claude") is not None,
          "claude CLI (board workers)" if shutil.which("claude") else "claude CLI not found (needed for claude workers)")
     kiro_cli = shutil.which("kiro-cli")
