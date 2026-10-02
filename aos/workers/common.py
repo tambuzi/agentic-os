@@ -19,9 +19,10 @@ WORKER_PROTOCOL = """\
 You are an agenticOS board worker running headless on one task of a multi-project feature. Other workers handle the other projects in parallel.
 1. Call task_show first.
 2. Call board_read before each step and before finishing; follow contract changes and other workers' notes.
-3. Work only inside the current directory (a git worktree on the feature branch). Commit with tests on the current branch. Never push. Never edit other projects.
-4. If the shared contract must change, call task_propose_contract and continue with the parts it doesn't affect. If nothing is left that you can do, call task_block with the reason.
-5. Finish with task_complete(summary): what changed, the commits, how it was tested, and anything dependent tasks must know."""
+3. Orient with the graphskill tools (repo_map, search_symbols, callers, read_symbol_body) before reading whole files; for other projects in the feature use code_query(project, tool, arguments).
+4. Work only inside the current directory (a git worktree on the feature branch). Commit with tests on the current branch. Never push. Never edit other projects.
+5. If the shared contract must change, call task_propose_contract and continue with the parts it doesn't affect. If nothing is left that you can do, call task_block with the reason.
+6. Finish with task_complete(summary): what changed, the commits, how it was tested, and anything dependent tasks must know."""
 
 NEUTRAL_TOOL = re.compile(r"^(read|write|shell:\S.*|mcp:[A-Za-z0-9_-]+)$")
 

@@ -61,4 +61,4 @@ def test_server_registers_all_tools(repo, home):
     names = {t.name for t in asyncio.run(mcp.list_tools())}
     assert names == {"memory_read", "memory_add", "memory_replace", "memory_remove",
                      "knowledge_search", "knowledge_read", "skill_list", "skill_view",
-                     "skill_manage", "project_list", "project_context"}
+                     "skill_manage", "project_list", "project_context", "code_tools", "code_query"}

@@ -97,6 +97,18 @@ class Tools:
     def project_context(self, slug: str) -> dict:
         return self.aos.project_context(slug)
 
+    @_safe
+    def code_tools(self, project: str) -> dict:
+        from . import codegraph
+        from .workers.common import linked_project_path
+        return {"project": project, "tools": codegraph.list_tools(linked_project_path(project))}
+
+    @_safe
+    def code_query(self, project: str, tool: str, arguments: dict | None = None) -> dict:
+        from . import codegraph
+        from .workers.common import linked_project_path
+        return {"project": project, **codegraph.query(linked_project_path(project), tool, arguments)}
+
 
 WORKER_TOOLS = {"task_show", "board_read", "task_comment", "task_block", "task_propose_contract",
                 "task_create", "task_complete"}
@@ -313,6 +325,16 @@ def build_server(tools: Tools, board_tools: BoardTools | None = None):
     def project_context(slug: str) -> dict:
         """Read another project's description and memory."""
         return tools.project_context(slug)
+
+    @mcp.tool()
+    def code_tools(project: str) -> dict:
+        """List the graphskill tools available for a linked project's code graph (any project, not only this one)."""
+        return tools.code_tools(project)
+
+    @mcp.tool()
+    def code_query(project: str, tool: str, arguments: dict | None = None) -> dict:
+        """Query any linked project's code graph via its graphskill server, e.g. tool="repo_map", "search_symbols" {"query": ...}, "search_semantic", "callers", "read_symbol_body". Use this for projects other than the current one."""
+        return tools.code_query(project, tool, arguments)
 
     if board_tools is not None:
         _register_board_tools(mcp, board_tools)

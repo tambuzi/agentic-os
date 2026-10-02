@@ -72,7 +72,7 @@ def test_tool_registration_by_mode(planner, worker):
     assert PLANNER_TOOLS <= names and not (WORKER_TOOLS - PLANNER_TOOLS) & names
     names = {t.name for t in asyncio.run(build_server(base, w).list_tools())}
     assert WORKER_TOOLS <= names and "feature_create" not in names
-    assert len({t.name for t in asyncio.run(build_server(base).list_tools())}) == 11
+    assert len({t.name for t in asyncio.run(build_server(base).list_tools())}) == 13
 
 
 @pytest.fixture

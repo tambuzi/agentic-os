@@ -82,6 +82,7 @@ The agent also gets these tools (MCP server `aos`):
 | `knowledge_search / knowledge_read` | search business docs, memory and skills |
 | `skill_list / skill_view / skill_manage` | find, read, create and patch skills |
 | `project_list / project_context` | read another project's memory |
+| `code_tools / code_query` | query **any** linked project's code graph (graphskill), not only the current one |
 | graphskill tools (`repo_map`, `search_symbols`, `callers`, …) | navigate code without reading whole files |
 
 Things you can say to the agent:
@@ -244,6 +245,7 @@ agenticOS repo (GitHub)               ~/.agenticos (local only, never pushed)
 | `aos` MCP server not available in Claude Code | approve the project's MCP server when prompted; check `aos` is on PATH |
 | `conflict, left untouched: ...` from `aos link` | a file or setting with that name already exists and isn't aos's; rename or remove it, then re-link |
 | graphskill warning in `aos doctor` | install graphskill, then `aos init <repo> --graphskill "<cmd>"` and re-run `aos link` |
+| `aos doctor`: `graphskill <project>: … Connection closed` | graphskill's server crashes on start. A fresh install pulls `mcp` 2.x, where `FastMCP` was removed: `pip install "mcp[cli]<2"` in graphskill's venv (until graphskill pins it) |
 
 ## Development
 
