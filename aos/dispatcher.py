@@ -10,6 +10,7 @@ worktree busy for a short grace period and is then terminated.
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import shutil
 import signal
@@ -81,6 +82,28 @@ def _kill_group(pgid: int, wait: float = 5.0, proc: subprocess.Popen | None = No
             time.sleep(0.05)
 
 
+LOCK_NAME = ".dispatcher.lock"
+
+
+def dispatcher_status(data: str | Path) -> dict:
+    """Is a dispatcher running? Probes the lock without taking it for longer than a moment."""
+    path = Path(data) / LOCK_NAME
+    if not path.exists():
+        return {"running": False}
+    with open(path, "r+") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            try:
+                info = json.loads(fh.read() or "{}")
+            except json.JSONDecodeError:
+                info = {}
+            return {"running": True, "feature": info.get("feature"), "pid": info.get("pid"),
+                    "started": info.get("started")}
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    return {"running": False}
+
+
 def _warn(msg: str) -> None:
     print(f"[aos board] {msg}", file=sys.stderr)
 
@@ -106,14 +129,19 @@ class Dispatcher:
     # -- lifecycle -----------------------------------------------------------
     @contextmanager
     def _lock(self):
-        path = self.board.data / ".dispatcher.lock"
+        path = self.board.data / LOCK_NAME
         path.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(path, "w")
+        fh = open(path, "a+")  # never truncate before holding the lock: the holder's info lives here
         try:
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             fh.close()
             raise AosError("another `aos board run` is already running")
+        fh.seek(0)
+        fh.truncate()
+        fh.write(json.dumps({"pid": os.getpid(), "feature": self.feature,
+                             "started": time.strftime("%Y-%m-%dT%H:%M:%S")}))
+        fh.flush()
         try:
             yield
         finally:
@@ -145,7 +173,12 @@ class Dispatcher:
         if settings.get("adapter") == "kiro":
             (kiro.agents_dir(settings) / f"{kiro.agent_name(t)}.json").unlink(missing_ok=True)
 
-    def run(self, once: bool = False) -> None:
+    def idle(self) -> bool:
+        """Nothing running and nothing that can start: the rest needs a human (blocked,
+        stuck, failed) or the feature is finished."""
+        return not self.running and not self.board.dispatchable(self.feature)
+
+    def run(self, once: bool = False, until_done: bool = False) -> None:
         self.once = once
         with self._lock():
             # handler first, so Ctrl-C at any point stops our workers instead of orphaning them
@@ -160,6 +193,8 @@ class Dispatcher:
                     self.board.promote()
                     return
                 while not (self.stopping and not self.running):
+                    if until_done and self.idle():
+                        return
                     time.sleep(self.tick_s)
                     self.tick()
             finally:

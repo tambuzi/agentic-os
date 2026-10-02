@@ -273,9 +273,13 @@ def cmd_board(a) -> int:
         from .dispatcher import Dispatcher
         repo = repo_root()
         print("dispatching (Ctrl-C to stop launching; twice to stop workers)" if not a.once else "dispatching once")
-        Dispatcher(repo, feature=a.feature, parallel=a.parallel).run(once=a.once)
+        Dispatcher(repo, feature=a.feature, parallel=a.parallel).run(once=a.once, until_done=a.until_done)
         return 0
+    from .dispatcher import dispatcher_status
     _, board = _board_ctx()
+    st = dispatcher_status(board.data)
+    print(f"dispatcher: running (pid {st['pid']}, feature {st.get('feature') or 'all'})" if st["running"]
+          else "dispatcher: not running")
     stuck = board.stuck()
     for f in board.features():
         if a.feature and f["slug"] != a.feature:
@@ -394,7 +398,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("action", nargs="?", choices=["run"])
     s.add_argument("--feature")
     s.add_argument("--parallel", type=_positive_int)
-    s.add_argument("--once", action="store_true")
+    s.add_argument("--once", action="store_true", help="one round: launch what is ready, wait for it, exit")
+    s.add_argument("--until-done", action="store_true",
+                   help="keep dispatching, exit when nothing more can run (finished, or waiting on a human)")
     s.set_defaults(fn=cmd_board)
     sub.add_parser("status", help="uncommitted agenticOS changes").set_defaults(fn=cmd_status)
     sub.add_parser("doctor", help="check installation").set_defaults(fn=cmd_doctor)

@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import functools
 import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 from . import skills
@@ -97,7 +100,7 @@ class Tools:
 
 WORKER_TOOLS = {"task_show", "board_read", "task_comment", "task_block", "task_propose_contract",
                 "task_create", "task_complete"}
-PLANNER_TOOLS = {"feature_create", "feature_show", "task_create", "board_read"}
+PLANNER_TOOLS = {"feature_create", "feature_show", "task_create", "board_read", "board_start", "board_status"}
 
 
 class BoardTools:
@@ -181,6 +184,64 @@ class BoardTools:
     @_safe
     def feature_create(self, slug: str, title: str, brief: str = "", contract: str = "") -> dict:
         return self.board.create_feature(slug, title, brief, contract, author=self.author)
+
+    @_safe
+    def board_start(self, feature: str, parallel: int | None = None) -> dict:
+        """Start the dispatcher in the background for one feature. It launches a separate
+        headless worker per task and exits by itself when nothing more can run."""
+        from .dispatcher import dispatcher_status
+        self.board.feature(feature)
+        if not self.board.tasks(feature=feature):
+            raise AosError(f"feature {feature!r} has no tasks", "create tasks with task_create first")
+        st = dispatcher_status(self.board.data)
+        if st["running"]:
+            if st.get("feature") in (None, feature):
+                return {"started": False, "dispatcher": st,
+                        "message": "dispatcher already running for this feature; use board_status to follow it"}
+            raise AosError(f"a dispatcher for feature {st.get('feature')!r} is running (pid {st.get('pid')})",
+                           "wait until it finishes (board_status), then call board_start again")
+        log = self.board.data / "logs" / f"dispatcher-{feature}.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        argv = [sys.executable, "-m", "aos", "board", "run", "--feature", feature, "--until-done"]
+        if parallel:
+            argv += ["--parallel", str(int(parallel))]
+        with open(log, "ab") as fh:
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT,
+                                    cwd=str(self.aos.home), start_new_session=True)
+        time.sleep(0.5)
+        if proc.poll() is not None and proc.returncode != 0:
+            tail = "\n".join(log.read_text(errors="replace").splitlines()[-10:])
+            raise AosError(f"dispatcher exited with code {proc.returncode}", tail)
+        return {"started": True, "pid": proc.pid, "log": str(log),
+                "message": "workers run in the background, one per task in its own worktree; "
+                           "follow them with board_status. Do not do the tasks yourself."}
+
+    @_safe
+    def board_status(self, feature: str) -> dict:
+        from .dispatcher import dispatcher_status
+        f = self.board.feature(feature)
+        tasks = self.board.tasks(feature=feature)
+        counts: dict[str, int] = {}
+        for t in tasks:
+            counts[t["status"]] = counts.get(t["status"], 0) + 1
+        blockers = {}
+        for e in self.board.events(feature):
+            if e["kind"] == "blocker":
+                blockers[e["task"]] = e["body"]
+        return {
+            "feature": {"slug": f["slug"], "title": f["title"], "status": f["status"],
+                        "contract_version": f["contract_version"]},
+            "dispatcher": dispatcher_status(self.board.data),
+            "counts": counts,
+            "tasks": [{"id": t["id"], "project": t["project"], "title": t["title"], "status": t["status"],
+                       "worker": t["worker"], "attempts": t["attempts"],
+                       "result": (t["result"] or "").splitlines()[0] if t["result"] else None} for t in tasks],
+            "blocked": [{"task": t["id"], "project": t["project"], "reason": blockers.get(t["id"], "")}
+                        for t in tasks if t["status"] == "blocked"],
+            "stuck": {str(k): v for k, v in self.board.stuck().items()
+                      if any(t["id"] == k for t in tasks)},
+            "pending_proposals": self.board.proposals(feature, "pending"),
+        }
 
     @_safe
     def feature_show(self, slug: str) -> dict:
@@ -315,6 +376,16 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
         def board_read(feature: str, since_event: int = 0) -> dict:
             """A feature's timeline."""
             return bt.board_read(feature=feature, since_event=since_event)
+
+        @mcp.tool()
+        def board_start(feature: str, parallel: int | None = None) -> dict:
+            """Start the feature's tasks: launches separate headless workers (one per task, each in its own project worktree) in the background. After planning, call this instead of doing the tasks yourself."""
+            return bt.board_start(feature, parallel)
+
+        @mcp.tool()
+        def board_status(feature: str) -> dict:
+            """Progress of a feature: task statuses and results, blockers, stuck tasks, pending contract proposals, whether workers are running."""
+            return bt.board_status(feature)
 
 
 def run_server(project: str | Path, task: int | None = None) -> None:
