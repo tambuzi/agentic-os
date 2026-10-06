@@ -45,9 +45,8 @@ inside the engine.
 
 **It listed the project slugs** (not "NO AOS TOOLS"). The bundled `wf-planner` step
 agent reached the `aos` MCP server configured in `.kiro/settings/mcp.json` and
-`project_list` returned 6 slugs:
-`payment-customer-api, payment-gateway-api, payment-method-api,
-payment-orchestration, payment-setup-context, spike`.
+`project_list` returned the 6 linked project slugs (5 work projects, names
+withheld because business data stays local, plus `spike`).
 **Confirmed:** a built-in workflow step agent inherits `.kiro/settings/mcp.json` and
 can call aos tools.
 
