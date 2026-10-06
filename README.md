@@ -176,9 +176,10 @@ Until sub-project 2 ships, learning only happens while a session is running. The
 One feature, several projects, several agents in parallel. Each agent works in its own project, knows the shared feature context, and coordinates through a local board.
 
 ```bash
-# 1. Plan. Interactively: ask the agent to "plan a feature" (aos-plan-feature skill).
-#    It creates the tasks and starts the workers itself (board_start); it does not do
-#    the tasks in your session. Ask it for progress any time (board_status).
+# 1. Plan. Interactively: ask the agent to "deliver a feature" (aos-feature skill). In one conversation
+#    it plans with you, creates the tasks, starts the workers, waits for them without
+#    spending tokens, asks you only when a task is blocked/failed or proposes a contract
+#    change, and reports at the end. It never does the tasks itself.
 #    Or by hand:
 aos feature new checkout-v2 --title "Checkout v2" --projects shop-api,web,billing
 $EDITOR ~/.agenticos/data/features/checkout-v2/brief.md      # goal, scope
@@ -218,6 +219,18 @@ projects:
     worker: {profile: claude, allowed_tools: ["shell:npm test", "shell:npm run lint"]}
 ```
 Workers never get "allow everything": only the listed tools, plus file edits inside their worktree.
+
+**In Kiro: drive it from the Workflows panel.** After planning, the agent can call `feature_workflow`, or you run:
+```bash
+aos feature workflow checkout-v2 --out ~/code/shop-api      # writes .kiro/workflows/aos-checkout-v2.workflow.yaml
+```
+Then enable **Workflows** in Kiro's Workspace Configuration and run `aos-checkout-v2`:
+- It starts the board.
+- It shows one live, zero-token watch per task.
+- When a task is blocked, fails or proposes a contract change, a step pauses and asks you in Kiro. Your answer is passed on (`task_unblock`, `task_retry`, `proposal_decide`), and the board starts again.
+- At the end it summarises the results and where each worktree is.
+
+The board still does the execution, so Claude Code users keep `aos board run`. Limit: about 15 tasks per workflow (Kiro allows 50 nodes).
 
 **Data.** The board is one SQLite file, `~/.agenticos/data/board.db` (no server). Feature files, logs and run contexts sit next to it. All of it is local.
 

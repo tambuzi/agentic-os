@@ -1,0 +1,54 @@
+# THROWAWAY SPIKE: can Kiro workflows drive agenticOS? See README.md in this folder.
+name: aos-spike
+description: "agenticOS spike (throwaway): aos tools from workflow steps + parallel command watches"
+steps:
+  # Check 2a: can a built-in workflow agent reach the aos MCP server (from .kiro/settings/mcp.json)?
+  - type: step
+    id: builtin-calls-aos
+    agent: wf-planner
+    prompt: |
+      Call the MCP tool `project_list` from the "aos" server and list the project slugs it returns.
+      If you have no aos tools at all, say exactly "NO AOS TOOLS".
+      Do not edit any files. Finish with send_message (severity success) containing your report.
+
+  # Checks 1 and 3: arbitrary CLI in a `command` watch handler, two in parallel.
+  - type: parallel
+    id: watches
+    joinPolicy: allSettled
+    branches:
+      - type: watch
+        id: watch-a
+        handler: command
+        config:
+          command: "aos board watch --demo 3"
+          pollIntervalSec: 5
+          commandTimeoutSec: 20
+        idleTimeoutSec: 300
+      - type: watch
+        id: watch-b
+        handler: command
+        config:
+          command: "aos board watch --demo 6"
+          pollIntervalSec: 5
+          commandTimeoutSec: 20
+        idleTimeoutSec: 300
+
+  - type: step
+    id: report
+    agent: wf-planner
+    prompt: |
+      Do not edit files. Write a short report with these lines, copying values verbatim:
+      1. builtin-calls-aos: {{builtin-calls-aos.output}}
+      2. watch-a output: {{watch-a.output}}
+      3. watch-b output: {{watch-b.output}}
+      4. worktree_path = "{{worktree_path}}", run_id = "{{run_id}}" (say "not set" if they appear literally with braces)
+      Finish with send_message (severity success) containing the report.
+
+  # Check 2b (last, because it may be rejected): can OUR custom agent be a step agent?
+  - type: step
+    id: custom-calls-aos
+    agent: aos-spike-agent
+    prompt: |
+      Call the MCP tool `project_list` from the "aos" server and list the project slugs it returns.
+      If you have no aos tools at all, say exactly "NO AOS TOOLS".
+      Finish with send_message (severity success) containing your report.

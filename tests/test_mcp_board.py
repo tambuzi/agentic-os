@@ -152,3 +152,41 @@ def test_board_status_reports_blockers_and_proposals(started):
 def test_planner_registers_start_and_status(planner):
     names = {t.name for t in asyncio.run(build_server(Tools(planner.aos), planner).list_tools())}
     assert {"board_start", "board_status"} <= names
+
+
+def test_planner_acts_on_human_answers(worker):
+    w, board, tid = worker
+    planner = BoardTools(AOS(w.aos.repo))
+    p = w.task_propose_contract("add currency", "multi-currency")["proposal"]
+    assert planner.proposal_decide(p, approve=True, reason="ok")["contract_version"] == 2
+    p2 = w.task_propose_contract("drop field", "nah")["proposal"]
+    assert planner.proposal_decide(p2, approve=False, reason="keep it")["rejected"] == p2
+    w.task_block("need API key")
+    assert planner.task_unblock(tid, note="key in vault")["status"] == "ready"
+    assert board.task(tid)["note"] == "key in vault"
+    board.claim(tid)
+    board.attempt_failed(tid, "crash")  # second attempt of max 2 -> failed
+    assert board.task(tid)["status"] == "failed"
+    assert planner.task_retry(tid, note="smaller steps")["status"] == "ready"
+    assert planner.task_cancel(tid)["status"] == "cancelled"
+    assert "error" in planner.task_unblock(tid)
+
+
+def test_feature_workflow_tool_writes_into_session_project(planner, configured, tmp_path):
+    from aos.config import load_user_config, save_user_config
+    proj = tmp_path / "api-checkout"
+    proj.mkdir()
+    save_user_config({**load_user_config(), "projects": {"api": {"path": str(proj), "targets": ["kiro"]}}})
+    planner.feature_create("checkout", "Checkout")
+    planner.task_create("api", "Orders", feature="checkout")
+    assert "error" in planner.feature_workflow("checkout")  # planner session not in a project
+    in_api = BoardTools(AOS(configured, slug="api"))
+    r = in_api.feature_workflow("checkout")
+    assert r["path"] == str(proj / ".kiro/workflows/aos-checkout.workflow.yaml")
+    assert (proj / ".kiro/workflows/aos-checkout.workflow.yaml").exists()
+    assert "Workflows" in r["message"]
+
+
+def test_planner_tool_set_includes_decision_tools(planner):
+    names = {t.name for t in asyncio.run(build_server(Tools(planner.aos), planner).list_tools())}
+    assert {"task_unblock", "task_retry", "task_cancel", "proposal_decide", "feature_workflow"} <= names

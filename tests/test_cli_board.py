@@ -130,3 +130,15 @@ def test_approve_edit(env, capsys, monkeypatch, editor):
     c = board.contract("checkout")
     assert c["version"] == 2 and "add currency (EUR only)" in c["text"]
     assert f"## Change v2 (proposal #{p})" in c["text"]
+
+
+def test_feature_workflow_command(env, capsys, tmp_path):
+    import yaml as _yaml
+    _, board = env
+    run(["feature", "new", "checkout", "--title", "Checkout"], capsys)
+    run(["task", "add", "checkout", "api", "Orders"], capsys)
+    code, out, _ = run(["feature", "workflow", "checkout", "--out", str(tmp_path / "ws")], capsys)
+    path = tmp_path / "ws/.kiro/workflows/aos-checkout.workflow.yaml"
+    assert code == 0 and str(path) in out
+    assert _yaml.safe_load(path.read_text())["steps"][1]["branches"][0]["id"] == "task-1"
+    assert run(["feature", "workflow", "checkout", "--poll", "5", "--out", str(tmp_path)], capsys)[0] == 1
