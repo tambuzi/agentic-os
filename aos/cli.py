@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import shutil
@@ -277,7 +278,53 @@ def cmd_task(a) -> int:
     return 0
 
 
+TERMINAL = ("done", "failed", "cancelled", "blocked")
+
+
+def _watch_poll(a, cursor) -> dict:
+    """One poll of the Kiro workflow `command` watch handler (spike)."""
+    if a.demo:
+        n = int((cursor or {}).get("n", 0)) + 1
+        if n >= a.demo:
+            return {"outcome": "terminal-state", "cursor": {"n": n}, "payload": json.dumps({"polls": n})}
+        return {"outcome": "new-activity", "cursor": {"n": n}, "payload": json.dumps({"polls": n})}
+    if a.task is None:
+        raise AosError("board watch needs --task <id> or --demo <n>")
+    _, board = _board_ctx()
+    t = board.task(a.task)
+    since = int((cursor or {}).get("event", 0))
+    events = [e for e in board.events(t["feature"], since) if e["task"] == t["id"]]
+    last = events[-1]["id"] if events else since
+    info = {"task": t["id"], "project": t["project"], "title": t["title"], "status": t["status"],
+            "attempts": t["attempts"], "events": [f"{e['kind']}: {e['body']}" for e in events][-10:]}
+    if t["status"] in TERMINAL:
+        info["result"] = t["result"]
+        blockers = [e["body"] for e in board.events(t["feature"]) if e["task"] == t["id"] and e["kind"] == "blocker"]
+        info["blocker"] = blockers[-1] if t["status"] == "blocked" and blockers else None
+        return {"outcome": "terminal-state", "cursor": {"event": last}, "payload": json.dumps(info)}
+    outcome = "new-activity" if events or cursor is None else "idle"
+    return {"outcome": outcome, "cursor": {"event": last}, "payload": json.dumps(info)}
+
+
+def cmd_board_watch(a) -> int:
+    """Kiro `command` watch handler: JSON on stdin, exactly one JSON object on stdout, always."""
+    try:
+        request = json.loads(sys.stdin.read() or "{}")
+    except json.JSONDecodeError:
+        request = {}
+    cursor = request.get("cursor") if isinstance(request, dict) else None
+    try:
+        out = _watch_poll(a, cursor)
+    except Exception as e:  # never break the handler contract
+        msg = e.message if isinstance(e, AosError) else f"{type(e).__name__}: {e}"
+        out = {"outcome": "terminal-state", "cursor": cursor or {}, "payload": json.dumps({"error": msg})}
+    print(json.dumps(out))
+    return 0
+
+
 def cmd_board(a) -> int:
+    if a.action == "watch":
+        return cmd_board_watch(a)
     if a.action == "run":
         from .dispatcher import Dispatcher
         repo = repo_root()
@@ -404,7 +451,9 @@ def _parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_task)
 
     s = sub.add_parser("board", help="board status, or `board run` to dispatch workers")
-    s.add_argument("action", nargs="?", choices=["run"])
+    s.add_argument("action", nargs="?", choices=["run", "watch"])
+    s.add_argument("--task", type=int, help="watch: the task to follow (Kiro workflow watch handler)")
+    s.add_argument("--demo", type=int, help="watch: spike mode, terminal after N polls")
     s.add_argument("--feature")
     s.add_argument("--parallel", type=_positive_int)
     s.add_argument("--once", action="store_true", help="one round: launch what is ready, wait for it, exit")

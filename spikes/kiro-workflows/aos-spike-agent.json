@@ -1,0 +1,11 @@
+{
+  "name": "aos-spike-agent",
+  "description": "agenticOS spike (throwaway): a custom agent that only has the aos MCP server",
+  "prompt": "You are a test agent for a workflow spike. Use only the aos MCP tools. Do not edit files. Finish every workflow step with send_message.",
+  "mcpServers": {
+    "aos": {"command": "aos", "args": ["serve", "--project", "."]}
+  },
+  "includeMcpJson": false,
+  "tools": ["read", "@aos"],
+  "allowedTools": ["read", "@aos"]
+}
