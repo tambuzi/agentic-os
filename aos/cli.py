@@ -192,7 +192,7 @@ def cmd_feature(a) -> int:
         board.create_feature(a.slug, a.title, brief, contract)
         d = board.feature_dir(a.slug)
         print(f"feature {a.slug} created\n  edit: {d / 'brief.md'}\n  edit: {d / 'contract.md'}")
-        print(f"then: aos task add {a.slug} <project> \"<title>\" [--after ids]   or use the aos-plan-feature skill")
+        print(f"then: aos task add {a.slug} <project> \"<title>\" [--after ids]   or ask the agent to deliver it (aos-feature skill)")
     elif a.action == "list":
         for f in board.features():
             n = len(board.tasks(feature=f["slug"]))
@@ -282,17 +282,13 @@ def cmd_task(a) -> int:
     return 0
 
 
-TERMINAL = ("done", "cancelled")
-ATTENTION = ("blocked", "failed")
-
-
 def _watch_poll(a, cursor) -> dict:
     """One poll of the Kiro workflow `command` watch handler.
 
     A Kiro watch node completes on its first `new-activity`, so: `idle` while the task
-    just runs or waits; `new-activity` only when a human is needed (blocked, failed,
-    pending contract proposal) and that situation changed since the cursor;
-    `terminal-state` when the task is done or cancelled."""
+    just runs or waits; `new-activity` only when a human is needed (aos.attention) and
+    that situation changed since the cursor; `terminal-state` when done or cancelled."""
+    from .attention import TERMINAL, task_attention
     if a.demo:
         n = int((cursor or {}).get("n", 0)) + 1
         if n >= a.demo:
@@ -302,28 +298,10 @@ def _watch_poll(a, cursor) -> dict:
         raise AosError("board watch needs --task <id> or --demo <n>")
     _, board = _board_ctx()
     t = board.task(a.task)
-    events = [e for e in board.events(t["feature"]) if e["task"] == t["id"]]
-    proposals = [{"id": p["id"], "reason": p["reason"], "change": p["body"]}
-                 for p in board.proposals(t["feature"], "pending") if p["task"] == t["id"]]
-    info = {"task": t["id"], "feature": t["feature"], "project": t["project"], "title": t["title"],
-            "status": t["status"], "attempts": t["attempts"], "max_attempts": t["max_attempts"]}
+    sig, info = task_attention(board, t, board.stuck())
     if t["status"] in TERMINAL:
-        info["result"] = t["result"]
         return {"outcome": "terminal-state", "cursor": {"sig": t["status"]}, "payload": json.dumps(info)}
-    sig = ""
-    if t["status"] == "blocked":
-        blk = [e for e in events if e["kind"] == "blocker"]
-        info["blocker"] = blk[-1]["body"] if blk else ""
-        sig = f"blocked:{blk[-1]['id'] if blk else 0}"
-    elif t["status"] == "failed":
-        st = [e for e in events if e["kind"] == "status"]
-        info["last_error"] = st[-1]["body"] if st else ""
-        sig = f"failed:{st[-1]['id'] if st else 0}"
-    if proposals:
-        info["proposals"] = proposals
-        sig += "|proposals:" + ",".join(str(p["id"]) for p in proposals)
-    previous = (cursor or {}).get("sig")
-    outcome = "new-activity" if sig and sig != previous else "idle"
+    outcome = "new-activity" if sig and sig != (cursor or {}).get("sig") else "idle"
     return {"outcome": outcome, "cursor": {"sig": sig}, "payload": json.dumps(info)}
 
 

@@ -8,6 +8,7 @@ say when to use each tool.
 from __future__ import annotations
 
 import functools
+import json
 import os
 import shutil
 import subprocess
@@ -114,7 +115,8 @@ class Tools:
 WORKER_TOOLS = {"task_show", "board_read", "task_comment", "task_block", "task_propose_contract",
                 "task_create", "task_complete"}
 PLANNER_TOOLS = {"feature_create", "feature_show", "task_create", "board_read", "board_start", "board_status",
-                 "task_unblock", "task_retry", "task_cancel", "proposal_decide", "feature_workflow"}
+                 "task_unblock", "task_retry", "task_cancel", "proposal_decide", "feature_workflow",
+                 "board_wait"}
 
 
 class BoardTools:
@@ -125,6 +127,7 @@ class BoardTools:
         self.aos = aos
         self.board = Board(aos.data, aos.settings["board"]["max_tasks_per_feature"])
         self.task_id = int(task_id) if task_id is not None else None
+        self.wait_poll_s = 3.0
 
     @property
     def author(self) -> str:
@@ -256,6 +259,51 @@ class BoardTools:
                       if any(t["id"] == k for t in tasks)},
             "pending_proposals": self.board.proposals(feature, "pending"),
         }
+
+    @_safe
+    def board_wait(self, feature: str, cursor: dict | str | None = None, timeout_sec: float = 300) -> dict:
+        """Block (zero model turns) until the feature needs the human, needs board_start,
+        is finished, or the timeout passes. Pass back `cursor` so answered/unanswered
+        situations already reported are not reported again."""
+        from .attention import TERMINAL, task_attention
+        from .dispatcher import dispatcher_status
+        self.board.feature(feature)
+        # clients may hand the cursor back as an object or as its JSON text
+        seen = json.loads(cursor) if isinstance(cursor, str) and cursor else (cursor or {})
+        deadline = time.monotonic() + max(0.0, min(float(timeout_sec), 900.0))
+        while True:
+            tasks = self.board.tasks(feature=feature)
+            if not tasks:
+                raise AosError(f"feature {feature!r} has no tasks")
+            stuck = self.board.stuck()
+            attention = {}
+            for t in tasks:
+                sig, info = task_attention(self.board, t, stuck)
+                if sig:
+                    attention[str(t["id"])] = (sig, info)
+            counts: dict[str, int] = {}
+            for t in tasks:
+                counts[t["status"]] = counts.get(t["status"], 0) + 1
+            new_cursor = {k: v[0] for k, v in attention.items()}
+            new = [info for k, (sig, info) in attention.items() if seen.get(k) != sig]
+            if new:
+                return {"reason": "attention", "attention": new, "counts": counts, "cursor": new_cursor}
+            if all(t["status"] in TERMINAL for t in tasks):
+                return {"reason": "finished", "counts": counts, "cursor": new_cursor,
+                        "tasks": [{"task": t["id"], "project": t["project"], "title": t["title"],
+                                   "status": t["status"], "result": t["result"]} for t in tasks]}
+            running = dispatcher_status(self.board.data)["running"]
+            if not running and self.board.dispatchable(feature):
+                return {"reason": "stalled", "counts": counts, "cursor": new_cursor,
+                        "message": "ready tasks but no dispatcher: call board_start, then board_wait again"}
+            if not running and not any(t["status"] in ("running", "ready") for t in tasks):
+                return {"reason": "waiting_on_human", "counts": counts, "cursor": new_cursor,
+                        "pending": [info for _, info in attention.values()],
+                        "message": "nothing can run until the user answers what is pending"}
+            if time.monotonic() >= deadline:
+                return {"reason": "timeout", "counts": counts, "cursor": new_cursor,
+                        "message": "still working; call board_wait again with this cursor"}
+            time.sleep(self.wait_poll_s)
 
     # -- planner mode: act on the human's answers (used by Kiro workflow steps) ----
     def _status(self, tid: int) -> dict:
@@ -445,6 +493,11 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
         def board_start(feature: str, parallel: int | None = None) -> dict:
             """Start the feature's tasks: launches separate headless workers (one per task, each in its own project worktree) in the background. After planning, call this instead of doing the tasks yourself."""
             return bt.board_start(feature, parallel)
+
+        @mcp.tool()
+        def board_wait(feature: str, cursor: dict | str | None = None, timeout_sec: float = 300) -> dict:
+            """Wait (no tokens spent) until the feature needs the user (reason "attention"), needs board_start ("stalled"), is "finished", is "waiting_on_human" for an answer, or "timeout" passes. Always pass back the returned cursor."""
+            return bt.board_wait(feature, cursor, timeout_sec)
 
         @mcp.tool()
         def task_unblock(task: int, note: str = "") -> dict:

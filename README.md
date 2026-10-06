@@ -176,9 +176,10 @@ Until sub-project 2 ships, learning only happens while a session is running. The
 One feature, several projects, several agents in parallel. Each agent works in its own project, knows the shared feature context, and coordinates through a local board.
 
 ```bash
-# 1. Plan. Interactively: ask the agent to "plan a feature" (aos-plan-feature skill).
-#    It creates the tasks and starts the workers itself (board_start); it does not do
-#    the tasks in your session. Ask it for progress any time (board_status).
+# 1. Plan. Interactively: ask the agent to "deliver a feature" (aos-feature skill). In one conversation
+#    it plans with you, creates the tasks, starts the workers, waits for them without
+#    spending tokens, asks you only when a task is blocked/failed or proposes a contract
+#    change, and reports at the end. It never does the tasks itself.
 #    Or by hand:
 aos feature new checkout-v2 --title "Checkout v2" --projects shop-api,web,billing
 $EDITOR ~/.agenticos/data/features/checkout-v2/brief.md      # goal, scope
