@@ -39,3 +39,8 @@ def test_protocols_point_at_code_query():
     from aos.context import PROTOCOL
     from aos.workers.common import WORKER_PROTOCOL
     assert "code_query" in PROTOCOL and "code_query" in WORKER_PROTOCOL
+
+
+def test_plan_feature_skill_offers_kiro_workflow():
+    text = (ROOT / "skills/aos-plan-feature/SKILL.md").read_text()
+    assert "feature_workflow" in text and "Workflows" in text

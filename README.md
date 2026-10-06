@@ -219,6 +219,18 @@ projects:
 ```
 Workers never get "allow everything": only the listed tools, plus file edits inside their worktree.
 
+**In Kiro: drive it from the Workflows panel.** After planning, the agent can call `feature_workflow`, or you run:
+```bash
+aos feature workflow checkout-v2 --out ~/code/shop-api      # writes .kiro/workflows/aos-checkout-v2.workflow.yaml
+```
+Then enable **Workflows** in Kiro's Workspace Configuration and run `aos-checkout-v2`:
+- It starts the board.
+- It shows one live, zero-token watch per task.
+- When a task is blocked, fails or proposes a contract change, a step pauses and asks you in Kiro. Your answer is passed on (`task_unblock`, `task_retry`, `proposal_decide`), and the board starts again.
+- At the end it summarises the results and where each worktree is.
+
+The board still does the execution, so Claude Code users keep `aos board run`. Limit: about 15 tasks per workflow (Kiro allows 50 nodes).
+
 **Data.** The board is one SQLite file, `~/.agenticos/data/board.db` (no server). Feature files, logs and run contexts sit next to it. All of it is local.
 
 ## Layout

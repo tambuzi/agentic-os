@@ -35,28 +35,55 @@ def task(configured, data):
     return board, t
 
 
-def test_task_activity_idle_and_terminal(task, capsys, monkeypatch):
+def test_progress_alone_stays_idle(task, capsys, monkeypatch):
+    """A Kiro watch node completes on its first new-activity, so plain progress must be idle."""
     board, t = task
     board.claim(t)
     r = poll(["--task", str(t)], {"cursor": None}, capsys, monkeypatch)
-    assert r["outcome"] == "new-activity" and json.loads(r["payload"])["status"] == "running"
-    r2 = poll(["--task", str(t)], {"cursor": r["cursor"]}, capsys, monkeypatch)
-    assert r2["outcome"] == "idle" and r2["cursor"] == r["cursor"]
+    assert r["outcome"] == "idle"
     board.comment(t, "halfway", author=f"task:{t}")
-    r3 = poll(["--task", str(t)], {"cursor": r2["cursor"]}, capsys, monkeypatch)
-    assert r3["outcome"] == "new-activity" and "halfway" in r3["payload"]
+    assert poll(["--task", str(t)], {"cursor": r["cursor"]}, capsys, monkeypatch)["outcome"] == "idle"
+
+
+def test_blocker_needs_attention_once(task, capsys, monkeypatch):
+    board, t = task
+    board.claim(t)
     board.block(t, "need API key", author=f"task:{t}")
-    r4 = poll(["--task", str(t)], {"cursor": r3["cursor"]}, capsys, monkeypatch)
-    p = json.loads(r4["payload"])
-    assert r4["outcome"] == "terminal-state" and p["status"] == "blocked" and p["blocker"] == "need API key"
+    r = poll(["--task", str(t)], {"cursor": None}, capsys, monkeypatch)
+    p = json.loads(r["payload"])
+    assert r["outcome"] == "new-activity" and p["status"] == "blocked" and p["blocker"] == "need API key"
+    assert poll(["--task", str(t)], {"cursor": r["cursor"]}, capsys, monkeypatch)["outcome"] == "idle"
+    board.unblock(t, "key in vault")
+    board.claim(t)
+    board.block(t, "now need a DB", author=f"task:{t}")
+    r2 = poll(["--task", str(t)], {"cursor": r["cursor"]}, capsys, monkeypatch)
+    assert r2["outcome"] == "new-activity" and json.loads(r2["payload"])["blocker"] == "now need a DB"
 
 
-def test_task_done_reports_result(task, capsys, monkeypatch):
+def test_pending_proposal_and_failure_need_attention(task, capsys, monkeypatch):
+    board, t = task
+    board.claim(t)
+    pid = board.propose(t, "add currency", "multi-currency", author=f"task:{t}")
+    r = poll(["--task", str(t)], {"cursor": None}, capsys, monkeypatch)
+    p = json.loads(r["payload"])
+    assert r["outcome"] == "new-activity" and p["proposals"][0]["id"] == pid
+    board.reject(pid, "no")
+    board.attempt_failed(t, "crash")
+    board.claim(t)
+    board.attempt_failed(t, "crash again")
+    r2 = poll(["--task", str(t)], {"cursor": r["cursor"]}, capsys, monkeypatch)
+    assert r2["outcome"] == "new-activity" and json.loads(r2["payload"])["status"] == "failed"
+
+
+def test_done_and_cancelled_are_terminal(task, capsys, monkeypatch):
     board, t = task
     board.claim(t)
     board.complete(t, "endpoint live", author=f"task:{t}")
     r = poll(["--task", str(t)], {"cursor": None}, capsys, monkeypatch)
     assert r["outcome"] == "terminal-state" and json.loads(r["payload"])["result"] == "endpoint live"
+    u = board.add_task("checkout", "web", "u")
+    board.cancel(u)
+    assert poll(["--task", str(u)], {"cursor": None}, capsys, monkeypatch)["outcome"] == "terminal-state"
 
 
 def test_errors_still_emit_one_json_object(configured, capsys, monkeypatch):

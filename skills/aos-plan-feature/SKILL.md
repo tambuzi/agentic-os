@@ -26,7 +26,7 @@ description: Plan a feature that spans several linked projects into an agenticOS
 
 **Do not implement the tasks yourself**, not even small ones. You are the planner. Each task is done by its own headless worker (Claude Code or Kiro), in that project's own git worktree, with the feature context plus that project's context.
 
-10. On the user's go-ahead, call `board_start(feature)`. It launches the workers in the background and returns immediately. They keep going even if this session ends.
+10. On the user's go-ahead, start it. **In Kiro**, offer the workflow view: call `feature_workflow(feature)` and tell the user to run `aos-<feature>` from Kiro's **Workflows** panel. It starts the workers, shows each task live, and asks them right there when a task is blocked, fails, or proposes a contract change. **Otherwise** (Claude Code, or the user prefers), call `board_start(feature)`. It launches the workers in the background and returns immediately. They keep going even if this session ends.
 11. Follow progress with `board_status(feature)` when the user asks, or after a natural pause. Report it briefly: what is done (with each result's first line), what is running, and anything that needs the user:
     - `blocked`: relay the reason. The user answers with `aos task unblock <id> --note "..."`.
     - `pending_proposals`: a worker wants to change the contract. Show the change; the user decides with `aos feature approve|reject <id>`.

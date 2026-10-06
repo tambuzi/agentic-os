@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -112,7 +113,8 @@ class Tools:
 
 WORKER_TOOLS = {"task_show", "board_read", "task_comment", "task_block", "task_propose_contract",
                 "task_create", "task_complete"}
-PLANNER_TOOLS = {"feature_create", "feature_show", "task_create", "board_read", "board_start", "board_status"}
+PLANNER_TOOLS = {"feature_create", "feature_show", "task_create", "board_read", "board_start", "board_status",
+                 "task_unblock", "task_retry", "task_cancel", "proposal_decide", "feature_workflow"}
 
 
 class BoardTools:
@@ -254,6 +256,46 @@ class BoardTools:
                       if any(t["id"] == k for t in tasks)},
             "pending_proposals": self.board.proposals(feature, "pending"),
         }
+
+    # -- planner mode: act on the human's answers (used by Kiro workflow steps) ----
+    def _status(self, tid: int) -> dict:
+        t = self.board.task(tid)
+        return {"task": t["id"], "status": t["status"]}
+
+    @_safe
+    def task_unblock(self, task: int, note: str = "") -> dict:
+        self.board.unblock(task, note, author="human")
+        return self._status(task)
+
+    @_safe
+    def task_retry(self, task: int, note: str = "") -> dict:
+        self.board.retry(task, note=note or None, author="human")
+        return self._status(task)
+
+    @_safe
+    def task_cancel(self, task: int) -> dict:
+        self.board.cancel(task, author="human")
+        return self._status(task)
+
+    @_safe
+    def proposal_decide(self, proposal: int, approve: bool, reason: str = "") -> dict:
+        if approve:
+            return self.board.approve(proposal, author="human")
+        self.board.reject(proposal, reason, author="human")
+        return {"rejected": int(proposal)}
+
+    @_safe
+    def feature_workflow(self, feature: str, poll: int = 30) -> dict:
+        from .kiroflow import write_recipe
+        from .workers.common import linked_project_path
+        if not self.aos.slug:
+            raise AosError("run this from a session inside a linked project",
+                           "or use `aos feature workflow <slug> --out <project>`")
+        aos_bin = shutil.which("aos") or "aos"
+        path = write_recipe(self.board, feature, linked_project_path(self.aos.slug), aos_bin, poll)
+        return {"path": str(path),
+                "message": "Open Kiro's Workflows panel (enable Workflows in Workspace Configuration) and run "
+                           f"aos-{feature}; it starts the workers and asks you when a task needs you."}
 
     @_safe
     def feature_show(self, slug: str) -> dict:
@@ -403,6 +445,31 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
         def board_start(feature: str, parallel: int | None = None) -> dict:
             """Start the feature's tasks: launches separate headless workers (one per task, each in its own project worktree) in the background. After planning, call this instead of doing the tasks yourself."""
             return bt.board_start(feature, parallel)
+
+        @mcp.tool()
+        def task_unblock(task: int, note: str = "") -> dict:
+            """Unblock a task with the human's answer (the note is passed to the worker)."""
+            return bt.task_unblock(task, note)
+
+        @mcp.tool()
+        def task_retry(task: int, note: str = "") -> dict:
+            """Queue a failed/blocked/cancelled task again, with the human's guidance as a note."""
+            return bt.task_retry(task, note)
+
+        @mcp.tool()
+        def task_cancel(task: int) -> dict:
+            """Cancel a task (a running worker is stopped)."""
+            return bt.task_cancel(task)
+
+        @mcp.tool()
+        def proposal_decide(proposal: int, approve: bool, reason: str = "") -> dict:
+            """Approve (new contract version) or reject a worker's contract proposal, on the human's decision."""
+            return bt.proposal_decide(proposal, approve, reason)
+
+        @mcp.tool()
+        def feature_workflow(feature: str, poll: int = 30) -> dict:
+            """Kiro only: write a Kiro workflow (.kiro/workflows/aos-<feature>.workflow.yaml) that runs the feature on the board and asks the user in Kiro when a task needs them."""
+            return bt.feature_workflow(feature, poll)
 
         @mcp.tool()
         def board_status(feature: str) -> dict:

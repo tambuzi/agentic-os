@@ -232,6 +232,10 @@ def cmd_feature(a) -> int:
     elif a.action == "reject":
         board.reject(a.id, a.reason or "")
         print(f"rejected #{a.id}")
+    elif a.action == "workflow":
+        from .kiroflow import write_recipe
+        path = write_recipe(board, a.slug, Path(a.out).expanduser().resolve(), shutil.which("aos") or "aos", a.poll)
+        print(f"wrote {path}\nrun it from Kiro's Workflows panel (aos-{a.slug}); it starts the board itself")
     else:
         board.set_feature_status(a.slug, "done" if a.action == "done" else "cancelled")
         print(f"feature {a.slug} {a.action}")
@@ -278,11 +282,17 @@ def cmd_task(a) -> int:
     return 0
 
 
-TERMINAL = ("done", "failed", "cancelled", "blocked")
+TERMINAL = ("done", "cancelled")
+ATTENTION = ("blocked", "failed")
 
 
 def _watch_poll(a, cursor) -> dict:
-    """One poll of the Kiro workflow `command` watch handler (spike)."""
+    """One poll of the Kiro workflow `command` watch handler.
+
+    A Kiro watch node completes on its first `new-activity`, so: `idle` while the task
+    just runs or waits; `new-activity` only when a human is needed (blocked, failed,
+    pending contract proposal) and that situation changed since the cursor;
+    `terminal-state` when the task is done or cancelled."""
     if a.demo:
         n = int((cursor or {}).get("n", 0)) + 1
         if n >= a.demo:
@@ -292,18 +302,29 @@ def _watch_poll(a, cursor) -> dict:
         raise AosError("board watch needs --task <id> or --demo <n>")
     _, board = _board_ctx()
     t = board.task(a.task)
-    since = int((cursor or {}).get("event", 0))
-    events = [e for e in board.events(t["feature"], since) if e["task"] == t["id"]]
-    last = events[-1]["id"] if events else since
-    info = {"task": t["id"], "project": t["project"], "title": t["title"], "status": t["status"],
-            "attempts": t["attempts"], "events": [f"{e['kind']}: {e['body']}" for e in events][-10:]}
+    events = [e for e in board.events(t["feature"]) if e["task"] == t["id"]]
+    proposals = [{"id": p["id"], "reason": p["reason"], "change": p["body"]}
+                 for p in board.proposals(t["feature"], "pending") if p["task"] == t["id"]]
+    info = {"task": t["id"], "feature": t["feature"], "project": t["project"], "title": t["title"],
+            "status": t["status"], "attempts": t["attempts"], "max_attempts": t["max_attempts"]}
     if t["status"] in TERMINAL:
         info["result"] = t["result"]
-        blockers = [e["body"] for e in board.events(t["feature"]) if e["task"] == t["id"] and e["kind"] == "blocker"]
-        info["blocker"] = blockers[-1] if t["status"] == "blocked" and blockers else None
-        return {"outcome": "terminal-state", "cursor": {"event": last}, "payload": json.dumps(info)}
-    outcome = "new-activity" if events or cursor is None else "idle"
-    return {"outcome": outcome, "cursor": {"event": last}, "payload": json.dumps(info)}
+        return {"outcome": "terminal-state", "cursor": {"sig": t["status"]}, "payload": json.dumps(info)}
+    sig = ""
+    if t["status"] == "blocked":
+        blk = [e for e in events if e["kind"] == "blocker"]
+        info["blocker"] = blk[-1]["body"] if blk else ""
+        sig = f"blocked:{blk[-1]['id'] if blk else 0}"
+    elif t["status"] == "failed":
+        st = [e for e in events if e["kind"] == "status"]
+        info["last_error"] = st[-1]["body"] if st else ""
+        sig = f"failed:{st[-1]['id'] if st else 0}"
+    if proposals:
+        info["proposals"] = proposals
+        sig += "|proposals:" + ",".join(str(p["id"]) for p in proposals)
+    previous = (cursor or {}).get("sig")
+    outcome = "new-activity" if sig and sig != previous else "idle"
+    return {"outcome": outcome, "cursor": {"sig": sig}, "payload": json.dumps(info)}
 
 
 def cmd_board_watch(a) -> int:
@@ -419,6 +440,10 @@ def _parser() -> argparse.ArgumentParser:
     f = fsub.add_parser("approve")
     f.add_argument("id", type=int)
     f.add_argument("--edit", action="store_true", help="edit the new contract in $EDITOR")
+    f = fsub.add_parser("workflow", help="write a Kiro workflow that runs this feature on the board")
+    f.add_argument("slug")
+    f.add_argument("--out", default=".", help="workspace to write .kiro/workflows/ into (default: here)")
+    f.add_argument("--poll", type=int, default=30, help="watch poll interval in seconds (min 10)")
     f = fsub.add_parser("reject")
     f.add_argument("id", type=int)
     f.add_argument("--reason")
