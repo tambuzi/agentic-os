@@ -101,7 +101,9 @@ def test_claude_adapter_argv(setup):
     assert argv[:2] == ["claude", "-p"] and argv[-2:] == ["--", spec.prompt]
     assert argv[argv.index("--append-system-prompt") + 1] == spec.context_file.read_text()
     mcp = json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text())
-    assert mcp["mcpServers"]["aos"]["args"][-1] == str(task["id"])
+    aos_args = mcp["mcpServers"]["aos"]["args"]
+    assert aos_args[aos_args.index("--task") + 1] == str(task["id"])
+    assert aos_args[aos_args.index("--attempt") + 1] == str(task["generation"])
     assert "--strict-mcp-config" in argv and argv[argv.index("--permission-mode") + 1] == "acceptEdits"
     assert argv[argv.index("--model") + 1] == "sonnet"
     assert argv[argv.index("--session-id") + 1] == launch.session_id

@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS tasks(
   title TEXT NOT NULL, spec TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'todo',
   worker TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL,
   contract_seen INTEGER, result TEXT, session_id TEXT, pid INTEGER, proc_start TEXT, note TEXT,
+  generation INTEGER NOT NULL DEFAULT 0,
   resume INTEGER NOT NULL DEFAULT 0, started TEXT, updated TEXT NOT NULL, created_by TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS deps(task INTEGER NOT NULL, depends_on INTEGER NOT NULL,
   PRIMARY KEY(task, depends_on));
@@ -74,6 +75,8 @@ class Board:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(tasks)")}
         if "proc_start" not in cols:  # boards created before proc_start existed
             c.execute("ALTER TABLE tasks ADD COLUMN proc_start TEXT")
+        if "generation" not in cols:  # boards created before attempt tokens existed
+            c.execute("ALTER TABLE tasks ADD COLUMN generation INTEGER NOT NULL DEFAULT 0")
         return c
 
     @contextmanager
@@ -264,11 +267,20 @@ class Board:
         return self._rows("SELECT * FROM events WHERE feature=? AND id>? ORDER BY id",
                           (feature, int(since)))
 
-    def comment(self, tid: int, text: str, author: str) -> None:
+    @staticmethod
+    def _check_generation(t, generation: int | None) -> None:
+        """Attempt token: refuse a worker bound to an older attempt (it outlived it)."""
+        if generation is not None and t["generation"] != int(generation):
+            raise AosError(f"stale worker: you belong to attempt {generation}, but task #{t['id']} is now on "
+                           f"attempt {t['generation']} ({t['status']})",
+                           "stop working on this task; another attempt owns it now")
+
+    def comment(self, tid: int, text: str, author: str, generation: int | None = None) -> None:
         if not (text or "").strip():
             raise AosError("comment is empty")
         with self._tx() as c:
             t = self._task_row(c, tid)
+            self._check_generation(t, generation)
             self._event(c, t["feature"], int(tid), "comment", author, text.strip())
 
     # -- task transitions ----------------------------------------------------
@@ -280,8 +292,8 @@ class Board:
             t = self._task_row(c, tid)
             self._transition(c, tid, ("ready",), "running", "dispatcher",
                              f"attempt {t['attempts'] + 1} started",
-                             attempts=t["attempts"] + 1, contract_seen=self._version(c, t["feature"]),
-                             started=now(), pid=None)
+                             attempts=t["attempts"] + 1, generation=t["generation"] + 1,
+                             contract_seen=self._version(c, t["feature"]), started=now(), pid=None)
         return self.task(tid)
 
     def set_process(self, tid: int, pid: int | None, session_id: str | None,
@@ -296,11 +308,12 @@ class Board:
             t = self._task_row(c, tid)
             c.execute("UPDATE tasks SET contract_seen=? WHERE id=?", (self._version(c, t["feature"]), int(tid)))
 
-    def complete(self, tid: int, summary: str, author: str) -> None:
+    def complete(self, tid: int, summary: str, author: str, generation: int | None = None) -> None:
         if not (summary or "").strip():
             raise AosError("summary is empty", "say what changed, the commits, and how it was tested")
         with self._tx() as c:
             t = self._task_row(c, tid)
+            self._check_generation(t, generation)
             v = self._version(c, t["feature"])
             if t["status"] == "running" and (t["contract_seen"] or 0) < v:
                 raise AosError(f"contract changed (v{t['contract_seen']}→v{v}) since you last read it",
@@ -311,10 +324,11 @@ class Board:
                              result=summary.strip(), pid=None, note=None, resume=0)
             self._event(c, t["feature"], int(tid), "result", author, summary.strip())
 
-    def block(self, tid: int, reason: str, author: str) -> None:
+    def block(self, tid: int, reason: str, author: str, generation: int | None = None) -> None:
         if not (reason or "").strip():
             raise AosError("block reason is empty")
         with self._tx() as c:
+            self._check_generation(self._task_row(c, tid), generation)
             t = self._transition(c, tid, ("todo", "ready", "running"), "blocked", author,
                                  f"blocked: {reason.strip()[:120]}", pid=None)
             self._event(c, t["feature"], int(tid), "blocker", author, reason.strip())
@@ -349,11 +363,12 @@ class Board:
                              author, "cancelled")
 
     # -- contract proposals --------------------------------------------------
-    def propose(self, tid: int, body: str, reason: str, author: str) -> int:
+    def propose(self, tid: int, body: str, reason: str, author: str, generation: int | None = None) -> int:
         if not (body or "").strip():
             raise AosError("proposal is empty")
         with self._tx() as c:
             t = self._task_row(c, tid)
+            self._check_generation(t, generation)
             cur = c.execute("INSERT INTO proposals(feature, task, body, reason, status) VALUES (?,?,?,?,?)",
                             (t["feature"], int(tid), body.strip(), (reason or "").strip(), "pending"))
             pid = cur.lastrowid

@@ -123,10 +123,12 @@ class BoardTools:
     """Board access over MCP. With task_id: a worker's tools for its own task.
     Without: planner tools for creating features and tasks."""
 
-    def __init__(self, aos: AOS, task_id: int | None = None):
+    def __init__(self, aos: AOS, task_id: int | None = None, attempt: int | None = None):
         self.aos = aos
         self.board = Board(aos.data, aos.settings["board"]["max_tasks_per_feature"])
         self.task_id = int(task_id) if task_id is not None else None
+        # attempt token: the generation this worker was launched for (None = unchecked)
+        self.attempt = int(attempt) if attempt is not None else None
         self.wait_poll_s = 3.0
 
     @property
@@ -158,22 +160,22 @@ class BoardTools:
 
     @_safe
     def task_comment(self, text: str) -> dict:
-        self.board.comment(self._own()["id"], text, self.author)
+        self.board.comment(self._own()["id"], text, self.author, generation=self.attempt)
         return {"ok": True}
 
     @_safe
     def task_block(self, reason: str) -> dict:
-        self.board.block(self._own()["id"], reason, self.author)
+        self.board.block(self._own()["id"], reason, self.author, generation=self.attempt)
         return {"ok": True, "message": "blocked; stop working on this task now"}
 
     @_safe
     def task_propose_contract(self, change: str, reason: str) -> dict:
-        pid = self.board.propose(self._own()["id"], change, reason, self.author)
+        pid = self.board.propose(self._own()["id"], change, reason, self.author, generation=self.attempt)
         return {"proposal": pid, "message": "a human will decide; continue with parts the change doesn't affect"}
 
     @_safe
     def task_complete(self, summary: str) -> dict:
-        self.board.complete(self._own()["id"], summary, self.author)
+        self.board.complete(self._own()["id"], summary, self.author, generation=self.attempt)
         return {"ok": True}
 
     # -- both modes ----------------------------------------------------------
@@ -192,7 +194,9 @@ class BoardTools:
     def task_create(self, project: str, title: str, spec: str = "", depends_on: list[int] | None = None,
                     feature: str | None = None) -> dict:
         if self.task_id:
-            feature = self._own()["feature"]
+            own = self._own()
+            Board._check_generation(own, self.attempt)
+            feature = own["feature"]
         if not feature:
             raise AosError("feature is required")
         return self._new_task(feature, project, title, spec, depends_on)
@@ -530,7 +534,7 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
             return bt.board_status(feature)
 
 
-def run_server(project: str | Path, task: int | None = None) -> None:
+def run_server(project: str | Path, task: int | None = None, attempt: int | None = None) -> None:
     from .link import sync
 
     cfg = load_user_config()
@@ -544,7 +548,7 @@ def run_server(project: str | Path, task: int | None = None) -> None:
 
     aos = AOS(repo, slug=slug)
     tools = Tools(aos, on_skills_changed=resync)
-    board_tools = BoardTools(aos, task_id=task)
+    board_tools = BoardTools(aos, task_id=task, attempt=attempt)
     cwd = os.getcwd()
     os.chdir(Path.home())  # FastMCP reads .env from cwd; keep project env files out of it
     try:

@@ -82,8 +82,11 @@ def linked_project_path(project: str) -> Path:
     return Path(info["path"])
 
 
-def mcp_servers(project_path: Path, task_id: int, aos_bin: str) -> dict:
-    servers = {"aos": {"command": aos_bin, "args": ["serve", "--project", str(project_path), "--task", str(task_id)]}}
+def mcp_servers(project_path: Path, task_id: int, aos_bin: str, generation: int | None = None) -> dict:
+    args = ["serve", "--project", str(project_path), "--task", str(task_id)]
+    if generation is not None:
+        args += ["--attempt", str(generation)]  # attempt token: stale workers get refused
+    servers = {"aos": {"command": aos_bin, "args": args}}
     try:
         gs = (json.loads(read_text(Path(project_path) / ".mcp.json") or "{}").get("mcpServers") or {}).get("graphskill")
     except json.JSONDecodeError:
@@ -131,7 +134,7 @@ def prepare_run(aos: AOS, board: Board, task: dict, worktree: Path, project_path
         prompt = base
     spec = RunSpec(task=task, project_path=Path(project_path), worktree=Path(worktree), run_dir=run_dir,
                    context_file=context_file, prompt=prompt,
-                   mcp_servers=mcp_servers(project_path, task["id"], aos_bin),
+                   mcp_servers=mcp_servers(project_path, task["id"], aos_bin, task.get("generation")),
                    allowed=settings["allowed_tools"], model=settings.get("model"),
                    resume=bool(task.get("resume")), session_id=task.get("session_id"))
     return spec, settings
