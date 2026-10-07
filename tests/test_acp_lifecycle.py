@@ -155,3 +155,21 @@ def test_retry_resume_loads_the_session(env, monkeypatch):
     Dispatcher(repo, tick=0.05).run(once=True)
     loads = [e for e in agent_events(tmp_path) if e["kind"] == "session/load"]
     assert loads and loads[0]["data"]["sessionId"] == "sess-previous"
+
+
+def test_worker_steer_is_not_replayed_to_the_reviewer(env, monkeypatch):
+    # found in the real run: the reviewer session got the worker's steer again
+    repo, b, write, tmp_path = env
+    write("claude", board_cfg={"review": True})
+    monkeypatch.setenv("FAKE_ACP_MODE", "slow")
+    monkeypatch.setenv("FAKE_ACP_SLOW", "2")
+    t = b.add_task("checkout", "api", "a", worker="claude")
+    d = Dispatcher(repo, tick=0.05)
+    try:
+        assert wait_for(lambda: any(e["kind"] == "prompt" for e in agent_events(tmp_path)), d)
+        assert main(["task", "steer", str(t), "use the v2 endpoint"]) == 0
+        assert wait_for(lambda: b.task(t)["status"] == "done", d, timeout=30)
+        assert [e for e in agent_events(tmp_path) if e["kind"] == "steer"] == [
+            {"kind": "steer", "data": "use the v2 endpoint"}]
+    finally:
+        stop(d)

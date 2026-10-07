@@ -325,7 +325,8 @@ class Dispatcher:
                 continue
             try:
                 r.acp.session.drain(on_request=lambda rid, m, p, tid=tid, r=r: self._on_agent_request(tid, r, rid, m, p))
-                self._deliver_steers(tid, r)
+                if r.kind == "worker":  # steers are the user's words for the worker, never its reviewer
+                    self._deliver_steers(tid, r)
                 self._service_turn(tid, r)
             except TASK_ERRORS as e:
                 _warn(f"task #{tid}: {e}")
