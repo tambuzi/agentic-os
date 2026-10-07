@@ -74,7 +74,7 @@ def test_worker_complete_goes_to_review_unless_disabled(configured, data):
 def env(configured, data, git_repo, tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", str(ROOT))
     (configured / "aos.yaml").write_text(yaml.safe_dump({
-        "board": {"default_worker": "fake"},
+        "board": {"default_worker": "fake", "review": False},  # verification alone; review has its own tests
         "workers": {"fake": {"adapter": "command", "timeout_min": 0.1,
                              "command": [sys.executable, str(FAKE), "{task_id}"]}}}))
     proj = git_repo(tmp_path / "api")

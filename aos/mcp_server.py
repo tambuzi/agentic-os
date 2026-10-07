@@ -123,17 +123,34 @@ class BoardTools:
     """Board access over MCP. With task_id: a worker's tools for its own task.
     Without: planner tools for creating features and tasks."""
 
-    def __init__(self, aos: AOS, task_id: int | None = None, attempt: int | None = None):
+    def __init__(self, aos: AOS, task_id: int | None = None, attempt: int | None = None,
+                 review: bool = False):
         self.aos = aos
         self.board = Board(aos.data, aos.settings["board"]["max_tasks_per_feature"])
         self.task_id = int(task_id) if task_id is not None else None
         # attempt token: the generation this worker was launched for (None = unchecked)
         self.attempt = int(attempt) if attempt is not None else None
+        self.review = bool(review)  # reviewer mode: judge the task, never complete it
         self.wait_poll_s = 3.0
 
     @property
     def author(self) -> str:
-        return f"task:{self.task_id}" if self.task_id else "planner"
+        if self.task_id:
+            return f"review:{self.task_id}" if self.review else f"task:{self.task_id}"
+        return "planner"
+
+    # -- reviewer mode ---------------------------------------------------------
+    @_safe
+    def review_pass(self, summary: str) -> dict:
+        tid = self._own()["id"]
+        self.board.review_verdict(tid, True, summary, generation=self.attempt, author=self.author)
+        return {"ok": True, "status": self.board.task(tid)["status"]}
+
+    @_safe
+    def review_fail(self, findings: str) -> dict:
+        tid = self._own()["id"]
+        self.board.review_verdict(tid, False, findings, generation=self.attempt, author=self.author)
+        return {"ok": True, "status": self.board.task(tid)["status"]}
 
     def _own(self) -> dict:
         if not self.task_id:
@@ -444,6 +461,27 @@ def build_server(tools: Tools, board_tools: BoardTools | None = None):
 
 
 def _register_board_tools(mcp, bt: BoardTools) -> None:
+    if bt.task_id and bt.review:
+        @mcp.tool()
+        def task_show() -> dict:
+            """The task under review: spec, feature brief, current contract, dependency results."""
+            return bt.task_show()
+
+        @mcp.tool()
+        def board_read(since_event: int = 0) -> dict:
+            """The feature timeline (what the worker and others reported)."""
+            return bt.board_read(since_event=since_event)
+
+        @mcp.tool()
+        def review_pass(summary: str) -> dict:
+            """Verdict: the task is done as specified. Summarise what you checked."""
+            return bt.review_pass(summary)
+
+        @mcp.tool()
+        def review_fail(findings: str) -> dict:
+            """Verdict: not done. Concrete, actionable findings (file:line, what is wrong, what is expected)."""
+            return bt.review_fail(findings)
+        return
     if bt.task_id:
         @mcp.tool()
         def task_show() -> dict:
@@ -542,7 +580,8 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
             return bt.board_status(feature)
 
 
-def run_server(project: str | Path, task: int | None = None, attempt: int | None = None) -> None:
+def run_server(project: str | Path, task: int | None = None, attempt: int | None = None,
+               review: bool = False) -> None:
     from .link import sync
 
     cfg = load_user_config()
@@ -556,7 +595,7 @@ def run_server(project: str | Path, task: int | None = None, attempt: int | None
 
     aos = AOS(repo, slug=slug)
     tools = Tools(aos, on_skills_changed=resync)
-    board_tools = BoardTools(aos, task_id=task, attempt=attempt)
+    board_tools = BoardTools(aos, task_id=task, attempt=attempt, review=review)
     cwd = os.getcwd()
     os.chdir(Path.home())  # FastMCP reads .env from cwd; keep project env files out of it
     try:

@@ -40,6 +40,7 @@ class RunSpec:
     model: str | None
     resume: bool
     session_id: str | None
+    role: str = "worker"  # or "reviewer"
 
 
 @dataclass
@@ -82,10 +83,13 @@ def linked_project_path(project: str) -> Path:
     return Path(info["path"])
 
 
-def mcp_servers(project_path: Path, task_id: int, aos_bin: str, generation: int | None = None) -> dict:
+def mcp_servers(project_path: Path, task_id: int, aos_bin: str, generation: int | None = None,
+                review: bool = False) -> dict:
     args = ["serve", "--project", str(project_path), "--task", str(task_id)]
     if generation is not None:
         args += ["--attempt", str(generation)]  # attempt token: stale workers get refused
+    if review:
+        args.append("--review")  # reviewer tools (review_pass / review_fail), no task_complete
     servers = {"aos": {"command": aos_bin, "args": args}}
     try:
         gs = (json.loads(read_text(Path(project_path) / ".mcp.json") or "{}").get("mcpServers") or {}).get("graphskill")
@@ -152,3 +156,65 @@ def write_mcp_config(spec: RunSpec) -> Path:
     path = spec.run_dir / "mcp.json"
     write_atomic(path, json.dumps({"mcpServers": spec.mcp_servers}, indent=2) + "\n")
     return path
+
+
+# -- independent review ----------------------------------------------------------
+REVIEW_PROTOCOL = """\
+You are an independent reviewer for one board task. Another agent did the work; you did not see its reasoning, on purpose.
+1. Call task_show, then read the diff below and the changed files in full where needed.
+2. Check the change against the task spec and the shared contract: correctness, edge cases, tests that really exercise the behaviour, nothing outside the task's scope, no secrets.
+3. Run the project's tests and any quick checks you need. Do NOT edit files, commit, or push: you only judge.
+4. Finish with exactly one verdict:
+   - review_pass(summary): the task is done as specified;
+   - review_fail(findings): concrete, actionable findings (file:line, what is wrong, what is expected). The worker will get them for its next attempt."""
+
+REVIEW_DIFF_MAX_CHARS = 60_000
+_REVIEW_DENY = ("write", "shell:git commit", "shell:git add", "shell:git push", "shell:git reset", "shell:git checkout")
+
+
+def _git_out(args: list[str], cwd: Path) -> str:
+    import subprocess
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    return r.stdout if r.returncode == 0 else f"(git {' '.join(args)} failed: {r.stderr.strip()})"
+
+
+def build_review_context(aos: AOS, board: Board, task: dict, worktree: Path) -> str:
+    feature = board.feature(task["feature"])
+    contract = board.contract(task["feature"])
+    base = task.get("base_commit") or "HEAD~1"
+    diff = _git_out(["diff", f"{base}..HEAD"], worktree)
+    if len(diff) > REVIEW_DIFF_MAX_CHARS:
+        diff = diff[:REVIEW_DIFF_MAX_CHARS] + "\n…[diff truncated; read the files directly]"
+    checks = [e["body"] for e in board.events(task["feature"]) if e["task"] == task["id"] and e["kind"] == "verified"]
+    parts = [
+        build_context(aos).rstrip(),
+        "## Reviewer protocol\n\n" + REVIEW_PROTOCOL,
+        f"## Feature {feature['slug']}: {feature['title']}\n\n{board.brief(feature['slug']).strip() or '(no brief)'}",
+        f"## Contract v{contract['version']}\n\n{contract['text'].strip() or '(no contract yet)'}",
+        f"## Task #{task['id']} ({task['project']}): {task['title']}\n\n{(task['spec'] or '').strip() or '(no spec)'}",
+        f"## What the worker claims\n\n{(task.get('result') or '').strip() or '(no summary)'}",
+        "## Automatic checks\n\n" + ("\n".join(checks[-3:]) or "(none recorded)"),
+        f"## Commits of this task ({base}..HEAD)\n\n{_git_out(['log', '--oneline', f'{base}..HEAD'], worktree).strip()}",
+        f"## Diff\n\n```diff\n{diff.strip()}\n```",
+    ]
+    return "\n\n".join(parts) + "\n"
+
+
+def prepare_review(aos: AOS, board: Board, task: dict, worktree: Path, project_path: Path,
+                   aos_bin: str) -> tuple[RunSpec, dict]:
+    """Inputs for the reviewer: same tool as the worker, fresh session, read-only tools."""
+    settings = profile_settings(aos, task["worker"], task["project"])
+    allowed = [a for a in settings["allowed_tools"] if not any(a == d or a.startswith(d) for d in _REVIEW_DENY)]
+    for needed in ("read", "shell:git diff", "shell:git log", "shell:git show"):
+        if needed not in allowed:
+            allowed.append(needed)
+    settings = {**settings, "allowed_tools": allowed}
+    run_dir = board.data / "runs" / f"{task['id']}-review-{task.get('review_attempts', 0)}"
+    context_file = run_dir / "context.md"
+    write_atomic(context_file, build_review_context(aos, board, task, Path(worktree)))
+    prompt = f"Review task #{task['id']}: {task['title']}. Follow the reviewer protocol and end with one verdict."
+    spec = RunSpec(task=task, project_path=Path(project_path), worktree=Path(worktree), run_dir=run_dir,
+                   context_file=context_file, prompt=prompt,
+                   mcp_servers=mcp_servers(project_path, task["id"], aos_bin, task.get("generation"), review=True),
+                   allowed=allowed, model=settings.get("model"), resume=False, session_id=None, role="reviewer")
+    return spec, settings

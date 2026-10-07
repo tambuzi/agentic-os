@@ -22,7 +22,7 @@ DEFAULTS = {
     "skills": {"mode": "direct"},
     "context": {"max_chars": 16000},
     "board": {"parallel": 3, "max_tasks_per_feature": 30, "default_worker": "claude",
-              "verify": True, "verify_timeout_sec": 600},
+              "verify": True, "verify_timeout_sec": 600, "review": True, "review_timeout_min": 15},
     "workers": {
         "common": {
             "timeout_min": 45,

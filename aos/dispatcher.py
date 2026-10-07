@@ -28,7 +28,7 @@ from .board import Board
 from .core import AOS
 from .errors import AosError
 from .workers import adapter
-from .workers.common import Launch, linked_project_path, prepare_run
+from .workers.common import Launch, linked_project_path, prepare_review, prepare_run
 from .verify import head_commit, verify_claim
 from .worktrees import branch_name, ensure_worktree, worktree_path
 
@@ -49,6 +49,8 @@ class Running:
     project: str
     timed_out: bool = False
     finished_at: float | None = None  # when the task left `running` while the process lived on
+    kind: str = "worker"              # or "reviewer"
+    generation: int = 0               # the attempt token it was launched with
 
 
 def process_start(pid: int) -> str | None:
@@ -198,6 +200,8 @@ class Dispatcher:
                         self._reap()
                         self._collect_verifications()
                         self._start_verifications()
+                        if not self.stopping:
+                            self._launch_reviews()
                     self.board.promote()
                     return
                 while not (self.stopping and not self.running):
@@ -225,6 +229,7 @@ class Dispatcher:
             _warn(f"promote: {e}")
         if not self.stopping:
             self._launch_ready()
+            self._launch_reviews()
         self._start_verifications()
         self._report_stuck()
 
@@ -239,6 +244,8 @@ class Dispatcher:
         live = {(r.feature, r.project) for r in self.running.values()}
         timeout = float(self.aos.settings["board"].get("verify_timeout_sec", 600))
         for t in pending:
+            if t["review_stage"] is not None:  # already verified; the reviewer takes it from here
+                continue
             if t["id"] in self.running or t["id"] in self.verifying or (t["feature"], t["project"]) in live:
                 continue
             worker = ((self.aos.projects().get(t["project"]) or {}).get("worker")) or {}
@@ -255,7 +262,9 @@ class Dispatcher:
             except Exception as e:  # a broken check is a rejected claim, never a crashed loop
                 ok, detail = False, f"verification error: {type(e).__name__}: {e}"
             try:
-                if ok:
+                if ok and self.aos.settings["board"].get("review", True):
+                    self.board.mark_verified(tid, detail)  # an independent reviewer is next
+                elif ok:
                     self.board.accept(tid, detail)
                 else:
                     self.board.reject_review(tid, detail)
@@ -285,17 +294,25 @@ class Dispatcher:
             except TASK_ERRORS as e:
                 _warn(f"task #{tid}: {e}")
 
+    def _still_owns(self, r: Running, task: dict) -> bool:
+        """Is the board still waiting on this process? A worker owns a `running` task; a
+        reviewer owns a task in review stage `reviewing` under its own generation."""
+        if r.kind == "reviewer":
+            return (task["status"] == "review" and task["review_stage"] == "reviewing"
+                    and task["generation"] == r.generation)
+        return task["status"] == "running"
+
     def _reap_one(self, tid: int, r: Running) -> None:
         code = r.proc.poll()
         if code is None:
-            status = self.board.task(tid)["status"]
+            task = self.board.task(tid)
             now = time.monotonic()
-            if status == "cancelled":
+            if task["status"] == "cancelled":
                 self._terminate(r)
             elif now > r.deadline:
                 r.timed_out = True
                 self._terminate(r)
-            elif status != "running":
+            elif not self._still_owns(r, task):
                 # completed/blocked but still alive: give it a moment to exit, then stop it
                 r.finished_at = r.finished_at or now
                 if now - r.finished_at >= self.grace_s:
@@ -308,7 +325,13 @@ class Dispatcher:
         r.launch.cleanup()
         r.log.close()
         del self.running[tid]
-        if self.board.task(tid)["status"] != "running":
+        task = self.board.task(tid)
+        if not self._still_owns(r, task):
+            return
+        if r.kind == "reviewer":
+            why = (f"timed out after {r.timeout_min:g} min" if r.timed_out
+                   else f"exited with code {code}" if code else "exited without a verdict")
+            self.board.review_unfinished(tid, why)
             return
         if r.timed_out:
             why = f"timed out after {r.timeout_min:g} min"
@@ -346,6 +369,51 @@ class Dispatcher:
                 self._launch(t)
             except TASK_ERRORS as e:
                 _warn(f"task #{t['id']}: {e}")
+
+    def _launch_reviews(self) -> None:
+        """Start an independent reviewer for each verified claim whose worktree is free."""
+        try:
+            pending = [t for t in self.board.reviewable(self.feature) if t["review_stage"] == "verified"]
+        except TASK_ERRORS as e:
+            _warn(f"board read: {e}")
+            return
+        live = {(r.feature, r.project) for r in self.running.values()}
+        for t in pending:
+            if len(self.running) >= self.parallel:
+                break
+            if t["id"] in self.running or (t["feature"], t["project"]) in live:
+                continue
+            live.add((t["feature"], t["project"]))
+            try:
+                self._launch_review(t)
+            except TASK_ERRORS as e:
+                _warn(f"task #{t['id']} review: {e}")
+
+    def _launch_review(self, t: dict) -> None:
+        tid = t["id"]
+        task = self.board.start_review(tid)  # new generation: the reviewer's own token
+        launch = None
+        try:
+            project_path = linked_project_path(t["project"])
+            wt = worktree_path(self.aos.home, t["feature"], t["project"])
+            aos = AOS(self.aos.repo, home=self.aos.home, slug=t["project"], data=self.aos.data)
+            spec, settings = prepare_review(aos, self.board, task, wt, project_path, self.aos_bin)
+            mod = adapter(settings["adapter"])
+            launch = mod.prepare(spec, settings)
+            log_path = self.board.data / "logs" / f"{tid}-review-{task['review_attempts']}.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log = open(log_path, "ab")
+            proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env=launch.env, stdin=subprocess.DEVNULL,
+                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        except Exception as e:  # a reviewer that cannot start counts as a review without verdict
+            if launch:
+                launch.cleanup()
+            self.board.review_unfinished(tid, f"reviewer launch failed: {e}")
+            return
+        timeout = float(self.aos.settings["board"].get("review_timeout_min", 15))
+        self.running[tid] = Running(proc, launch, time.monotonic() + 60 * timeout, timeout, log,
+                                    getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"],
+                                    kind="reviewer", generation=task["generation"])
 
     def _launch(self, t: dict) -> None:
         tid = t["id"]

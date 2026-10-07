@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS tasks(
   worker TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL,
   contract_seen INTEGER, result TEXT, session_id TEXT, pid INTEGER, proc_start TEXT, note TEXT,
   generation INTEGER NOT NULL DEFAULT 0, resume_hint INTEGER NOT NULL DEFAULT 0, last_failure TEXT,
-  base_commit TEXT, feedback TEXT,
+  base_commit TEXT, feedback TEXT, review_stage TEXT, review_attempts INTEGER NOT NULL DEFAULT 0,
   resume INTEGER NOT NULL DEFAULT 0, started TEXT, updated TEXT NOT NULL, created_by TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS deps(task INTEGER NOT NULL, depends_on INTEGER NOT NULL,
   PRIMARY KEY(task, depends_on));
@@ -85,7 +85,9 @@ class Board:
                            ("resume_hint", "INTEGER NOT NULL DEFAULT 0"),     # resume hint
                            ("last_failure", "TEXT"),                          # same-failure detection
                            ("base_commit", "TEXT"),                           # verify: commits since claim
-                           ("feedback", "TEXT")):                             # why a claim was rejected
+                           ("feedback", "TEXT"),                              # why a claim was rejected
+                           ("review_stage", "TEXT"),                          # None | verified | reviewing
+                           ("review_attempts", "INTEGER NOT NULL DEFAULT 0")):  # reviewer launches
             if name not in cols:  # boards created before the column existed
                 c.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
         return c
@@ -340,32 +342,91 @@ class Board:
             first = summary.strip().splitlines()[0][:120]
             if to == "review":
                 self._transition(c, tid, ("running",), "review", author, f"claimed done, verifying: {first}",
-                                 result=summary.strip(), pid=None)
+                                 result=summary.strip(), pid=None, review_stage=None, review_attempts=0)
             else:
                 self._transition(c, tid, ("running",), "done", author, f"done: {first}",
                                  result=summary.strip(), pid=None, note=None, resume=0,
                                  resume_hint=0, last_failure=None, feedback=None)
             self._event(c, t["feature"], int(tid), "result", author, summary.strip())
 
-    def accept(self, tid: int, detail: str, author: str = "dispatcher") -> None:
+    def _accept(self, c, tid: int, detail: str, author: str, kind: str) -> None:
+        t = self._transition(c, tid, ("review",), "done", author, f"done: {detail[:160]}",
+                             note=None, resume=0, resume_hint=0, last_failure=None, feedback=None,
+                             review_stage=None, review_attempts=0)
+        self._event(c, t["feature"], int(tid), kind, author, detail)
+
+    def _reject(self, c, tid: int, findings: str, author: str) -> None:
+        t = self._task_row(c, tid)
+        repeated = bool(t["last_failure"]) and _same_failure(t["last_failure"], findings)
+        to = "failed" if repeated or t["attempts"] >= t["max_attempts"] else "ready"
+        why = " (same failure twice: retrying won't help)" if repeated else ""
+        self._transition(c, tid, ("review",), to, author, f"attempt {t['attempts']} not accepted{why} → {to}",
+                         feedback=findings, last_failure=findings, resume_hint=0,
+                         review_stage=None, review_attempts=0)
+        self._event(c, t["feature"], int(tid), "rejected", author, findings)
+
+    def accept(self, tid: int, detail: str, author: str = "dispatcher", kind: str = "verified") -> None:
         """review -> done: the claim was verified (and reviewed)."""
         with self._tx() as c:
-            t = self._transition(c, tid, ("review",), "done", author, f"done: {detail}",
-                                 note=None, resume=0, resume_hint=0, last_failure=None, feedback=None)
-            self._event(c, t["feature"], int(tid), "verified", author, detail)
+            self._accept(c, tid, detail, author, kind)
 
     def reject_review(self, tid: int, findings: str, author: str = "dispatcher") -> None:
         """review -> ready (or failed): the claim did not hold up. The findings go to the
         next attempt; the same findings twice end the task (loop detection)."""
         with self._tx() as c:
+            self._reject(c, tid, findings, author)
+
+    # -- independent review (Kiro Crew: TaskRunner self-review of the actual diff) ----
+    def _in_review(self, c, tid: int, stage: str | None):
+        t = self._task_row(c, tid)
+        if t["status"] != "review" or t["review_stage"] != stage:
+            raise AosError(f"task #{tid} is not awaiting that review step "
+                           f"(status {t['status']}, review stage {t['review_stage']})")
+        return t
+
+    def mark_verified(self, tid: int, detail: str, author: str = "dispatcher") -> None:
+        """Verification passed; an independent reviewer is next."""
+        with self._tx() as c:
+            t = self._in_review(c, tid, None)
+            c.execute("UPDATE tasks SET review_stage='verified', updated=? WHERE id=?", (now(), int(tid)))
+            self._event(c, t["feature"], int(tid), "verified", author, detail)
+
+    def start_review(self, tid: int) -> dict:
+        """verified -> reviewing. The reviewer gets its own attempt token (generation)."""
+        with self._tx() as c:
+            t = self._in_review(c, tid, "verified")
+            c.execute("UPDATE tasks SET review_stage='reviewing', review_attempts=?, generation=?, updated=? "
+                      "WHERE id=?", (t["review_attempts"] + 1, t["generation"] + 1, now(), int(tid)))
+            self._event(c, t["feature"], int(tid), "status", "dispatcher",
+                        f"independent review {t['review_attempts'] + 1} started")
+        return self.task(tid)
+
+    def review_verdict(self, tid: int, ok: bool, text: str, generation: int | None = None,
+                       author: str | None = None) -> None:
+        if not (text or "").strip():
+            raise AosError("a review verdict needs a summary or findings")
+        who = author or f"review:{tid}"
+        with self._tx() as c:
             t = self._task_row(c, tid)
-            repeated = bool(t["last_failure"]) and _same_failure(t["last_failure"], findings)
-            to = "failed" if repeated or t["attempts"] >= t["max_attempts"] else "ready"
-            why = " (same failure twice: retrying won't help)" if repeated else ""
-            self._transition(c, tid, ("review",), to, author,
-                             f"attempt {t['attempts']} not accepted{why} → {to}",
-                             feedback=findings, last_failure=findings, resume_hint=0)
-            self._event(c, t["feature"], int(tid), "rejected", author, findings)
+            self._check_generation(t, generation)
+            self._in_review(c, tid, "reviewing")
+            if ok:
+                self._accept(c, tid, f"reviewed: {text.strip()}", who, "reviewed")
+            else:
+                self._reject(c, tid, f"independent review: {text.strip()}", who)
+
+    def review_unfinished(self, tid: int, reason: str) -> None:
+        """The reviewer ended without a verdict. Try once more; after two such reviews accept
+        the verified work, visibly, rather than punish the worker for a flaky reviewer."""
+        with self._tx() as c:
+            t = self._in_review(c, tid, "reviewing")
+            if t["review_attempts"] >= 2:
+                self._accept(c, tid, f"accepted without independent review (reviewer failed twice: {reason})",
+                             "dispatcher", "review_skipped")
+            else:
+                c.execute("UPDATE tasks SET review_stage='verified', updated=? WHERE id=?", (now(), int(tid)))
+                self._event(c, t["feature"], int(tid), "status", "dispatcher",
+                            f"review {t['review_attempts']} ended without a verdict ({reason}); retrying")
 
     def reviewable(self, feature: str | None = None) -> list[dict]:
         """tasks waiting for verification/review, in open features."""

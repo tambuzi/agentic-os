@@ -95,7 +95,7 @@ def cmd_context(a) -> int:
 
 def cmd_serve(a) -> int:
     from .mcp_server import run_server
-    run_server(a.project, a.task, a.attempt)
+    run_server(a.project, a.task, a.attempt, a.review)
     return 0
 
 
@@ -398,6 +398,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--project", default=".")
     s.add_argument("--task", type=int, help="board worker mode for this task id")
     s.add_argument("--attempt", type=int, help="board worker mode: the attempt (generation) this worker owns")
+    s.add_argument("--review", action="store_true", help="board reviewer mode: review_pass / review_fail only")
     s.set_defaults(fn=cmd_serve)
 
     s = sub.add_parser("inbox", help="review staged memory/skill proposals")

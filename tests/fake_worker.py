@@ -9,6 +9,19 @@ from aos.board import Board
 from aos.config import data_root
 
 tid = int(sys.argv[1])
+role = sys.argv[2] if len(sys.argv) > 2 else "worker"
+if role == "reviewer":
+    from aos.board import Board as _B
+    from aos.config import data_root as _dr
+    _b = _B(_dr())
+    _gen = _b.task(tid)["generation"]
+    verdict = os.environ.get("FAKE_REVIEW", "pass")
+    if verdict == "pass":
+        _b.review_verdict(tid, True, "looks right: spec and contract met", generation=_gen)
+    elif verdict == "fail":
+        _b.review_verdict(tid, False, "orders.py:3 total ignores the discount; expected 90.0 for SAVE10 on 100",
+                          generation=_gen)
+    sys.exit(0)  # verdict "none": exit without a verdict
 mode = os.environ.get(f"FAKE_MODE_{tid}", os.environ.get("FAKE_MODE", "complete"))
 board = Board(data_root())
 if mode == "crash":
