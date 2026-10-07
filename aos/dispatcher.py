@@ -29,6 +29,7 @@ from .core import AOS
 from .errors import AosError
 from .workers import adapter
 from .workers.common import Launch, linked_project_path, prepare_review, prepare_run
+from .sysmem import available_gb
 from .verify import head_commit, revert_to, verify_claim
 from .worktrees import branch_name, ensure_worktree, worktree_path
 
@@ -50,6 +51,7 @@ class Running:
     timed_out: bool = False
     finished_at: float | None = None  # when the task left `running` while the process lived on
     kind: str = "worker"              # or "reviewer"
+    started_at: float = 0.0           # monotonic; recent starts reserve memory they haven't used yet
     generation: int = 0               # the attempt token it was launched with
 
 
@@ -119,9 +121,15 @@ class Dispatcher:
         board_cfg = self.aos.settings["board"]
         self.board = Board(self.aos.data, board_cfg["max_tasks_per_feature"])
         self.feature = feature
-        self.parallel = int(parallel if parallel is not None else board_cfg["parallel"])
+        setting = parallel if parallel is not None else board_cfg["parallel"]
+        # `auto`: the ceiling is max_parallel; free memory decides each start (see _may_start)
+        self.parallel = int(board_cfg.get("max_parallel", 6) if str(setting) == "auto" else setting)
         if self.parallel < 1:
             raise AosError("parallel must be at least 1")
+        self.worker_gb = float(board_cfg.get("worker_memory_gb", 1.0))
+        self.min_free_gb = float(board_cfg.get("min_free_memory_gb", 2.0))
+        self.settle_s = 60.0
+        self._held_reason = ""
         self.tick_s = tick
         self.grace_s = 30.0
         self.running: dict[int, Running] = {}
@@ -359,16 +367,41 @@ class Dispatcher:
             _warn(f"board read: {e}")
             return
         for t in ready:
-            if len(self.running) >= self.parallel:
-                break
             key = (t["feature"], t["project"])
             if t["id"] in self.running or key in busy:
                 continue
+            if not self._may_start():
+                break
             busy.add(key)
             try:
                 self._launch(t)
             except TASK_ERRORS as e:
                 _warn(f"task #{t['id']}: {e}")
+
+    def _may_start(self) -> bool:
+        """One more worker? Under the ceiling, and enough memory left after it. Workers started
+        in the last minute haven't used their memory yet, so their estimate is reserved. With
+        nothing running one always starts, so work can't freeze."""
+        n = len(self.running)
+        if n >= self.parallel:
+            return False
+        if n == 0:
+            return True
+        free = available_gb()
+        if free is None:
+            return True
+        now = time.monotonic()
+        fresh = sum(1 for r in self.running.values() if now - r.started_at < self.settle_s)
+        projected = free - self.worker_gb * (fresh + 1)
+        if projected < self.min_free_gb:
+            reason = (f"holding new workers: {free:.1f} GB free, {projected:.1f} GB would remain "
+                      f"(minimum {self.min_free_gb:g} GB)")
+            if reason != self._held_reason:
+                _warn(reason)
+                self._held_reason = reason
+            return False
+        self._held_reason = ""
+        return True
 
     def _launch_reviews(self) -> None:
         """Start an independent reviewer for each verified claim whose worktree is free."""
@@ -379,10 +412,10 @@ class Dispatcher:
             return
         live = {(r.feature, r.project) for r in self.running.values()}
         for t in pending:
-            if len(self.running) >= self.parallel:
-                break
             if t["id"] in self.running or (t["feature"], t["project"]) in live:
                 continue
+            if not self._may_start():
+                break
             live.add((t["feature"], t["project"]))
             try:
                 self._launch_review(t)
@@ -413,7 +446,7 @@ class Dispatcher:
         timeout = float(self.aos.settings["board"].get("review_timeout_min", 15))
         self.running[tid] = Running(proc, launch, time.monotonic() + 60 * timeout, timeout, log,
                                     getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"],
-                                    kind="reviewer", generation=task["generation"])
+                                    kind="reviewer", generation=task["generation"], started_at=time.monotonic())
 
     def _launch(self, t: dict) -> None:
         tid = t["id"]
@@ -446,5 +479,6 @@ class Dispatcher:
             return
         timeout = float(settings["timeout_min"])
         self.running[tid] = Running(proc, launch, time.monotonic() + 60 * timeout, timeout, log,
-                                    getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"])
+                                    getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"],
+                                    generation=task["generation"], started_at=time.monotonic())
         self.board.set_process(tid, proc.pid, launch.session_id, proc_start=process_start(proc.pid))
