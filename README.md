@@ -232,6 +232,23 @@ Then enable **Workflows** in Kiro's Workspace Configuration and run `aos-checkou
 
 The board still does the execution, so Claude Code users keep `aos board run`. Limit: about 15 tasks per workflow (Kiro allows 50 nodes).
 
+**Before a task counts as done:**
+1. The worker's `task_complete` is only a claim.
+2. aos checks the task actually added commits and that the project's `verify_command` passes (set it in `~/.agenticos/data/projects.yaml`, e.g. `worker: {verify_command: "npm test"}`).
+3. A **separate reviewer** (same tool, fresh session, read-only) checks the task's own diff against the spec and the contract.
+4. If either step rejects the work, the worktree is reset to where the attempt started, and the findings go to the next attempt.
+
+**Safety rails:**
+- the same failure twice stops a task;
+- an interrupted attempt makes the next one inspect the repository first;
+- a stale worker can't act on a newer attempt;
+- starts are staggered and gated by free memory (`board.parallel: auto`).
+
+**Cost:**
+- cost is recorded per attempt (Claude);
+- optional `board.task_budget_usd` / `feature_budget_usd` block further attempts once reached;
+- `aos task steer <id> "..."` sends guidance to a running worker.
+
 **Data.** The board is one SQLite file, `~/.agenticos/data/board.db` (no server). Feature files, logs and run contexts sit next to it. All of it is local.
 
 ## Layout

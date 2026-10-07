@@ -95,7 +95,7 @@ def cmd_context(a) -> int:
 
 def cmd_serve(a) -> int:
     from .mcp_server import run_server
-    run_server(a.project, a.task)
+    run_server(a.project, a.task, a.attempt, a.review)
     return 0
 
 
@@ -273,6 +273,9 @@ def cmd_task(a) -> int:
     elif a.action == "retry":
         board.retry(a.id, note=a.note, worker=a.worker, resume=a.resume)
         print(f"task #{a.id} queued again")
+    elif a.action == "steer":
+        board.steer(a.id, a.message)
+        print(f"task #{a.id}: message queued; the worker reads it at its next board_read")
     elif a.action == "cancel":
         board.cancel(a.id)
         print(f"task #{a.id} cancelled")
@@ -339,7 +342,9 @@ def cmd_board(a) -> int:
     for f in board.features():
         if a.feature and f["slug"] != a.feature:
             continue
-        print(f"{f['slug']} [{f['status']}] contract v{f['contract_version']}: {f['title']}")
+        spent = board.feature_cost(f["slug"])
+        print(f"{f['slug']} [{f['status']}] contract v{f['contract_version']}: {f['title']}"
+              + (f"  (${spent:.2f})" if spent else ""))
         for t in board.tasks(feature=f["slug"]):
             extra = ""
             if t["id"] in stuck:
@@ -347,7 +352,9 @@ def cmd_board(a) -> int:
             elif t["status"] == "blocked":
                 blk = [e for e in board.events(f["slug"]) if e["task"] == t["id"] and e["kind"] == "blocker"]
                 extra = f"  {blk[-1]['body'][:80]}" if blk else ""
-            print(f"  #{t['id']:<4} {t['project']:<14} {t['status']:<10} {t['attempts']}/{t['max_attempts']}  {t['title']}{extra}")
+            cost = board.task_cost(t["id"])
+            print(f"  #{t['id']:<4} {t['project']:<14} {t['status']:<10} {t['attempts']}/{t['max_attempts']}"
+                  f"{f'  ${cost:.2f}' if cost else ''}  {t['title']}{extra}")
         for p in board.proposals(f["slug"], "pending"):
             print(f"  proposal #{p['id']} pending: {p['reason']}  (aos feature approve|reject {p['id']})")
     return 0
@@ -397,6 +404,8 @@ def _parser() -> argparse.ArgumentParser:
     s = sub.add_parser("serve", help="run the MCP server over stdio")
     s.add_argument("--project", default=".")
     s.add_argument("--task", type=int, help="board worker mode for this task id")
+    s.add_argument("--attempt", type=int, help="board worker mode: the attempt (generation) this worker owns")
+    s.add_argument("--review", action="store_true", help="board reviewer mode: review_pass / review_fail only")
     s.set_defaults(fn=cmd_serve)
 
     s = sub.add_parser("inbox", help="review staged memory/skill proposals")
@@ -448,6 +457,9 @@ def _parser() -> argparse.ArgumentParser:
     t.add_argument("--note")
     t.add_argument("--worker")
     tsub.add_parser("cancel").add_argument("id", type=int)
+    t = tsub.add_parser("steer", help="send guidance to a task's worker while it works")
+    t.add_argument("id", type=int)
+    t.add_argument("message")
     t = tsub.add_parser("unblock")
     t.add_argument("id", type=int)
     t.add_argument("--note")

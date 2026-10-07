@@ -18,6 +18,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,7 +28,9 @@ from .board import Board
 from .core import AOS
 from .errors import AosError
 from .workers import adapter
-from .workers.common import Launch, linked_project_path, prepare_run
+from .workers.common import Launch, linked_project_path, parse_cost, prepare_review, prepare_run
+from .sysmem import available_gb
+from .verify import head_commit, revert_to, verify_claim
 from .worktrees import branch_name, ensure_worktree, worktree_path
 
 # Board-level failures for a single task (status moved under us, sqlite busy, ...)
@@ -47,6 +50,10 @@ class Running:
     project: str
     timed_out: bool = False
     finished_at: float | None = None  # when the task left `running` while the process lived on
+    kind: str = "worker"              # or "reviewer"
+    started_at: float = 0.0           # monotonic; recent starts reserve memory they haven't used yet
+    log_path: Path | None = None      # the run's output, read for its cost when it exits
+    generation: int = 0               # the attempt token it was launched with
 
 
 def process_start(pid: int) -> str | None:
@@ -115,12 +122,22 @@ class Dispatcher:
         board_cfg = self.aos.settings["board"]
         self.board = Board(self.aos.data, board_cfg["max_tasks_per_feature"])
         self.feature = feature
-        self.parallel = int(parallel if parallel is not None else board_cfg["parallel"])
+        setting = parallel if parallel is not None else board_cfg["parallel"]
+        # `auto`: the ceiling is max_parallel; free memory decides each start (see _may_start)
+        self.parallel = int(board_cfg.get("max_parallel", 6) if str(setting) == "auto" else setting)
         if self.parallel < 1:
             raise AosError("parallel must be at least 1")
+        self.worker_gb = float(board_cfg.get("worker_memory_gb", 1.0))
+        self.min_free_gb = float(board_cfg.get("min_free_memory_gb", 2.0))
+        self.settle_s = 60.0
+        self._held_reason = ""
+        self.stagger_s = float(board_cfg.get("start_stagger_sec", 2.0))
+        self._last_start = float("-inf")
         self.tick_s = tick
         self.grace_s = 30.0
         self.running: dict[int, Running] = {}
+        self.verifying: dict[int, Future] = {}
+        self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="aos-verify")
         self.stopping = False
         self.once = False
         self.aos_bin = shutil.which("aos") or "aos"
@@ -176,7 +193,8 @@ class Dispatcher:
     def idle(self) -> bool:
         """Nothing running and nothing that can start: the rest needs a human (blocked,
         stuck, failed) or the feature is finished."""
-        return not self.running and not self.board.dispatchable(self.feature)
+        return (not self.running and not self.verifying and not self.board.dispatchable(self.feature)
+                and not self.board.reviewable(self.feature))
 
     def run(self, once: bool = False, until_done: bool = False) -> None:
         self.once = once
@@ -187,9 +205,14 @@ class Dispatcher:
                 self.recover()
                 self.tick()
                 if once:
-                    while self.running:
+                    # finish what this round started, including verifying its claims
+                    while self.running or self.verifying or self.board.reviewable(self.feature):
                         time.sleep(self.tick_s)
                         self._reap()
+                        self._collect_verifications()
+                        self._start_verifications()
+                        if not self.stopping:
+                            self._launch_reviews()
                     self.board.promote()
                     return
                 while not (self.stopping and not self.running):
@@ -210,13 +233,54 @@ class Dispatcher:
     # -- one tick ------------------------------------------------------------
     def tick(self) -> None:
         self._reap()
+        self._collect_verifications()
         try:
             self.board.promote()
         except TASK_ERRORS as e:
             _warn(f"promote: {e}")
         if not self.stopping:
             self._launch_ready()
+            self._launch_reviews()
+        self._start_verifications()
         self._report_stuck()
+
+    # -- verification of claims ------------------------------------------------
+    def _start_verifications(self) -> None:
+        """Verify `review` tasks once their worker process is gone (worktree quiescent)."""
+        try:
+            pending = self.board.reviewable(self.feature)
+        except TASK_ERRORS as e:
+            _warn(f"board read: {e}")
+            return
+        live = {(r.feature, r.project) for r in self.running.values()}
+        timeout = float(self.aos.settings["board"].get("verify_timeout_sec", 600))
+        for t in pending:
+            if t["review_stage"] is not None:  # already verified; the reviewer takes it from here
+                continue
+            if t["id"] in self.running or t["id"] in self.verifying or (t["feature"], t["project"]) in live:
+                continue
+            worker = ((self.aos.projects().get(t["project"]) or {}).get("worker")) or {}
+            wt = worktree_path(self.aos.home, t["feature"], t["project"])
+            self.verifying[t["id"]] = self._pool.submit(verify_claim, t, wt, worker.get("verify_command"), timeout)
+
+    def _collect_verifications(self) -> None:
+        for tid, fut in list(self.verifying.items()):
+            if not fut.done():
+                continue
+            del self.verifying[tid]
+            try:
+                ok, detail = fut.result()
+            except Exception as e:  # a broken check is a rejected claim, never a crashed loop
+                ok, detail = False, f"verification error: {type(e).__name__}: {e}"
+            try:
+                if ok and self.aos.settings["board"].get("review", True):
+                    self.board.mark_verified(tid, detail)  # an independent reviewer is next
+                elif ok:
+                    self.board.accept(tid, detail)
+                else:
+                    self.board.reject_review(tid, detail)
+            except TASK_ERRORS as e:
+                _warn(f"task #{tid}: {e}")
 
     def _report_stuck(self) -> None:
         if self.running:
@@ -241,17 +305,25 @@ class Dispatcher:
             except TASK_ERRORS as e:
                 _warn(f"task #{tid}: {e}")
 
+    def _still_owns(self, r: Running, task: dict) -> bool:
+        """Is the board still waiting on this process? A worker owns a `running` task; a
+        reviewer owns a task in review stage `reviewing` under its own generation."""
+        if r.kind == "reviewer":
+            return (task["status"] == "review" and task["review_stage"] == "reviewing"
+                    and task["generation"] == r.generation)
+        return task["status"] == "running"
+
     def _reap_one(self, tid: int, r: Running) -> None:
         code = r.proc.poll()
         if code is None:
-            status = self.board.task(tid)["status"]
+            task = self.board.task(tid)
             now = time.monotonic()
-            if status == "cancelled":
+            if task["status"] == "cancelled":
                 self._terminate(r)
             elif now > r.deadline:
                 r.timed_out = True
                 self._terminate(r)
-            elif status != "running":
+            elif not self._still_owns(r, task):
                 # completed/blocked but still alive: give it a moment to exit, then stop it
                 r.finished_at = r.finished_at or now
                 if now - r.finished_at >= self.grace_s:
@@ -264,17 +336,53 @@ class Dispatcher:
         r.launch.cleanup()
         r.log.close()
         del self.running[tid]
-        if self.board.task(tid)["status"] != "running":
+        self._record_cost(tid, r)
+        task = self.board.task(tid)
+        if not self._still_owns(r, task):
+            return
+        if r.kind == "reviewer":
+            why = (f"timed out after {r.timeout_min:g} min" if r.timed_out
+                   else f"exited with code {code}" if code else "exited without a verdict")
+            self.board.review_unfinished(tid, why)
             return
         if r.timed_out:
             why = f"timed out after {r.timeout_min:g} min"
-        elif code in r.exit_reasons:
-            why = r.exit_reasons[code]
+        elif code in r.exit_reasons:  # the tool says it never got going (e.g. MCP startup)
+            self.board.attempt_failed(tid, r.exit_reasons[code], ran=False)
+            return
         elif code == 0:
             why = "exited without task_complete"
         else:
             why = f"exited with code {code}"
         self.board.attempt_failed(tid, why)
+
+    def _record_cost(self, tid: int, r: Running) -> None:
+        if not r.log_path:
+            return
+        try:
+            with open(r.log_path, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                fh.seek(max(0, fh.tell() - 262_144))
+                usd = parse_cost(fh.read().decode("utf-8", errors="replace"))
+        except OSError:
+            return
+        if usd is not None:
+            self.board.add_cost(tid, usd, role=r.kind, generation=r.generation)
+
+    def _over_budget(self, t: dict) -> str | None:
+        cfg = self.aos.settings["board"]
+        task_budget, feature_budget = cfg.get("task_budget_usd"), cfg.get("feature_budget_usd")
+        if task_budget is not None:
+            spent = self.board.task_cost(t["id"])
+            if spent >= float(task_budget):
+                return (f"task budget reached: ${spent:.2f} of ${float(task_budget):.2f} spent; raise "
+                        "board.task_budget_usd in aos.yaml and unblock, or cancel the task")
+        if feature_budget is not None:
+            spent = self.board.feature_cost(t["feature"])
+            if spent >= float(feature_budget):
+                return (f"feature budget reached: ${spent:.2f} of ${float(feature_budget):.2f} spent on "
+                        f"{t['feature']}; raise board.feature_budget_usd in aos.yaml and unblock")
+        return None
 
     def _launch_ready(self) -> None:
         try:
@@ -284,20 +392,104 @@ class Dispatcher:
             _warn(f"board read: {e}")
             return
         busy |= {(r.feature, r.project) for r in self.running.values()}
+        # a worktree whose last task awaits verification is not free yet
+        try:
+            busy |= {(t["feature"], t["project"]) for t in self.board.reviewable()}
+        except TASK_ERRORS as e:
+            _warn(f"board read: {e}")
+            return
         for t in ready:
-            if len(self.running) >= self.parallel:
-                break
             key = (t["feature"], t["project"])
             if t["id"] in self.running or key in busy:
                 continue
+            if not self._may_start():
+                break
             busy.add(key)
             try:
                 self._launch(t)
             except TASK_ERRORS as e:
                 _warn(f"task #{t['id']}: {e}")
 
+    def _may_start(self) -> bool:
+        """One more worker? Under the ceiling, and enough memory left after it. Workers started
+        in the last minute haven't used their memory yet, so their estimate is reserved. With
+        nothing running one always starts, so work can't freeze."""
+        n = len(self.running)
+        if n >= self.parallel:
+            return False
+        if time.monotonic() - self._last_start < self.stagger_s:
+            return False  # stagger cold starts: each one spawns its MCP servers too
+        if n == 0:
+            return True
+        free = available_gb()
+        if free is None:
+            return True
+        now = time.monotonic()
+        fresh = sum(1 for r in self.running.values() if now - r.started_at < self.settle_s)
+        projected = free - self.worker_gb * (fresh + 1)
+        if projected < self.min_free_gb:
+            reason = (f"holding new workers: {free:.1f} GB free, {projected:.1f} GB would remain "
+                      f"(minimum {self.min_free_gb:g} GB)")
+            if reason != self._held_reason:
+                _warn(reason)
+                self._held_reason = reason
+            return False
+        self._held_reason = ""
+        return True
+
+    def _launch_reviews(self) -> None:
+        """Start an independent reviewer for each verified claim whose worktree is free."""
+        try:
+            pending = [t for t in self.board.reviewable(self.feature) if t["review_stage"] == "verified"]
+        except TASK_ERRORS as e:
+            _warn(f"board read: {e}")
+            return
+        live = {(r.feature, r.project) for r in self.running.values()}
+        for t in pending:
+            if t["id"] in self.running or (t["feature"], t["project"]) in live:
+                continue
+            if not self._may_start():
+                break
+            live.add((t["feature"], t["project"]))
+            try:
+                self._launch_review(t)
+            except TASK_ERRORS as e:
+                _warn(f"task #{t['id']} review: {e}")
+
+    def _launch_review(self, t: dict) -> None:
+        tid = t["id"]
+        task = self.board.start_review(tid)  # new generation: the reviewer's own token
+        launch = None
+        try:
+            project_path = linked_project_path(t["project"])
+            wt = worktree_path(self.aos.home, t["feature"], t["project"])
+            aos = AOS(self.aos.repo, home=self.aos.home, slug=t["project"], data=self.aos.data)
+            spec, settings = prepare_review(aos, self.board, task, wt, project_path, self.aos_bin)
+            mod = adapter(settings["adapter"])
+            launch = mod.prepare(spec, settings)
+            log_path = self.board.data / "logs" / f"{tid}-review-{task['review_attempts']}.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log = open(log_path, "ab")
+            proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env=launch.env, stdin=subprocess.DEVNULL,
+                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        except Exception as e:  # a reviewer that cannot start counts as a review without verdict
+            if launch:
+                launch.cleanup()
+            self.board.review_unfinished(tid, f"reviewer launch failed: {e}")
+            return
+        timeout = float(self.aos.settings["board"].get("review_timeout_min", 15))
+        self.running[tid] = Running(proc, launch, time.monotonic() + 60 * timeout, timeout, log,
+                                    getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"],
+                                    kind="reviewer", generation=task["generation"], started_at=time.monotonic(),
+                                    log_path=log_path)
+        self._last_start = time.monotonic()
+
     def _launch(self, t: dict) -> None:
         tid = t["id"]
+        over = self._over_budget(t)
+        if over:
+            self.board.block(tid, over, author="dispatcher")
+            return
         try:
             project_path = linked_project_path(t["project"])
             wt = ensure_worktree(project_path, worktree_path(self.aos.home, t["feature"], t["project"]),
@@ -305,7 +497,10 @@ class Dispatcher:
         except AosError as e:
             self.board.block(tid, e.message + (f" ({e.hint})" if e.hint else ""), author="dispatcher")
             return
-        task = self.board.claim(tid)  # raises if the task moved (e.g. cancelled) meanwhile
+        if t.get("revert_to"):  # the previous attempt was rejected: start from its base again
+            ok, detail = revert_to(wt, t["revert_to"])
+            self.board.log_event(tid, "reverted" if ok else "status", detail)
+        task = self.board.claim(tid, base_commit=head_commit(wt))  # raises if the task moved meanwhile
         launch = None
         try:
             aos = AOS(self.aos.repo, home=self.aos.home, slug=t["project"], data=self.aos.data)
@@ -320,9 +515,12 @@ class Dispatcher:
         except Exception as e:  # any launch failure is a failed attempt, never a crash of the loop
             if launch:
                 launch.cleanup()
-            self.board.attempt_failed(tid, f"launch failed: {e}")
+            self.board.attempt_failed(tid, f"launch failed: {e}", ran=False)
             return
         timeout = float(settings["timeout_min"])
         self.running[tid] = Running(proc, launch, time.monotonic() + 60 * timeout, timeout, log,
-                                    getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"])
+                                    getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"],
+                                    generation=task["generation"], started_at=time.monotonic(),
+                                    log_path=log_path)
+        self._last_start = time.monotonic()
         self.board.set_process(tid, proc.pid, launch.session_id, proc_start=process_start(proc.pid))

@@ -106,3 +106,13 @@ def test_cursor_round_trips_as_object_or_string(bt):
     result = asyncio.run(server.call_tool("board_wait", {"feature": "checkout", "cursor": r["cursor"],
                                                          "timeout_sec": 2}))
     assert "waiting_on_human" in json.dumps(result, default=str)
+
+
+def test_claims_awaiting_verification_without_dispatcher_are_stalled(bt):
+    t = bt.task_create("api", "a", feature="checkout")["task"]
+    board = bt.board
+    board.promote()
+    board.claim(t)
+    board.complete(t, "claimed", author="w", to="review")
+    r = bt.board_wait("checkout", timeout_sec=2)
+    assert r["reason"] == "stalled" and "board_start" in r["message"]

@@ -17,7 +17,7 @@ from .config import check_slug
 from .errors import AosError
 from .store import read_text, write_atomic
 
-STATUSES = ("todo", "ready", "running", "blocked", "done", "failed", "cancelled")
+STATUSES = ("todo", "ready", "running", "review", "blocked", "done", "failed", "cancelled")
 FEATURE_STATUSES = ("open", "done", "cancelled")
 CONTRACT_HEADER = "<!-- aos contract v{} -->"
 
@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS tasks(
   title TEXT NOT NULL, spec TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'todo',
   worker TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL,
   contract_seen INTEGER, result TEXT, session_id TEXT, pid INTEGER, proc_start TEXT, note TEXT,
+  generation INTEGER NOT NULL DEFAULT 0, resume_hint INTEGER NOT NULL DEFAULT 0, last_failure TEXT,
+  base_commit TEXT, feedback TEXT, review_stage TEXT, review_attempts INTEGER NOT NULL DEFAULT 0, revert_to TEXT,
   resume INTEGER NOT NULL DEFAULT 0, started TEXT, updated TEXT NOT NULL, created_by TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS deps(task INTEGER NOT NULL, depends_on INTEGER NOT NULL,
   PRIMARY KEY(task, depends_on));
@@ -39,6 +41,9 @@ CREATE TABLE IF NOT EXISTS events(
 CREATE TABLE IF NOT EXISTS proposals(
   id INTEGER PRIMARY KEY AUTOINCREMENT, feature TEXT NOT NULL, task INTEGER, body TEXT NOT NULL,
   reason TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', decided TEXT);
+CREATE TABLE IF NOT EXISTS costs(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, task INTEGER NOT NULL, feature TEXT NOT NULL,
+  generation INTEGER, role TEXT NOT NULL, usd REAL NOT NULL, ts TEXT NOT NULL);
 """
 
 
@@ -49,6 +54,11 @@ def now() -> str:
 def _contract_file(version: int, body: str) -> str:
     head = CONTRACT_HEADER.format(version)
     return f"{head}\n{body.strip()}\n" if body.strip() else f"{head}\n"
+
+
+def _same_failure(a: str, b: str) -> bool:
+    """Loop detection: the same failure reason, ignoring whitespace and case."""
+    return " ".join(a.split()).lower() == " ".join(b.split()).lower()
 
 
 def _contract_body(text: str) -> str:
@@ -74,6 +84,16 @@ class Board:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(tasks)")}
         if "proc_start" not in cols:  # boards created before proc_start existed
             c.execute("ALTER TABLE tasks ADD COLUMN proc_start TEXT")
+        for name, decl in (("generation", "INTEGER NOT NULL DEFAULT 0"),      # attempt tokens
+                           ("resume_hint", "INTEGER NOT NULL DEFAULT 0"),     # resume hint
+                           ("last_failure", "TEXT"),                          # same-failure detection
+                           ("base_commit", "TEXT"),                           # verify: commits since claim
+                           ("feedback", "TEXT"),                              # why a claim was rejected
+                           ("review_stage", "TEXT"),                          # None | verified | reviewing
+                           ("review_attempts", "INTEGER NOT NULL DEFAULT 0"),  # reviewer launches
+                           ("revert_to", "TEXT")):                            # rejected work to undo
+            if name not in cols:  # boards created before the column existed
+                c.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
         return c
 
     @contextmanager
@@ -264,24 +284,74 @@ class Board:
         return self._rows("SELECT * FROM events WHERE feature=? AND id>? ORDER BY id",
                           (feature, int(since)))
 
-    def comment(self, tid: int, text: str, author: str) -> None:
+    @staticmethod
+    def _check_generation(t, generation: int | None) -> None:
+        """Attempt token: refuse a worker bound to an older attempt (it outlived it)."""
+        if generation is not None and t["generation"] != int(generation):
+            raise AosError(f"stale worker: you belong to attempt {generation}, but task #{t['id']} is now on "
+                           f"attempt {t['generation']} ({t['status']})",
+                           "stop working on this task; another attempt owns it now")
+
+    # -- cost (Kiro Crew: per-item credit budgets) --------------------------------
+    def add_cost(self, tid: int, usd: float, role: str = "worker", generation: int | None = None) -> None:
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            c.execute("INSERT INTO costs(task, feature, generation, role, usd, ts) VALUES (?,?,?,?,?,?)",
+                      (int(tid), t["feature"], generation, role, float(usd), now()))
+
+    def costs(self, tid: int) -> list[dict]:
+        return self._rows("SELECT * FROM costs WHERE task=? ORDER BY id", (int(tid),))
+
+    def task_cost(self, tid: int) -> float:
+        return self._rows("SELECT COALESCE(SUM(usd), 0) AS s FROM costs WHERE task=?", (int(tid),))[0]["s"]
+
+    def feature_cost(self, feature: str) -> float:
+        return self._rows("SELECT COALESCE(SUM(usd), 0) AS s FROM costs WHERE feature=?", (feature,))[0]["s"]
+
+    def steer(self, tid: int, message: str, author: str = "human") -> None:
+        """A message from the user for the task's worker, read at its next board_read."""
+        if not (message or "").strip():
+            raise AosError("steer message is empty")
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            if t["status"] in ("done", "cancelled", "failed"):
+                raise AosError(f"task #{tid} is {t['status']}; nothing is working on it to steer",
+                               "use aos task retry --note instead")
+            self._event(c, t["feature"], int(tid), "steer", author, message.strip())
+
+    def steer_messages(self, tid: int, since: int = 0) -> list[dict]:
+        t = self.task(tid)
+        return [{"id": e["id"], "ts": e["ts"], "message": e["body"]}
+                for e in self.events(t["feature"], since) if e["task"] == t["id"] and e["kind"] == "steer"]
+
+    def log_event(self, tid: int, kind: str, body: str, author: str = "dispatcher") -> None:
+        """A system event on a task's timeline (no state change)."""
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            self._event(c, t["feature"], int(tid), kind, author, body)
+
+    def comment(self, tid: int, text: str, author: str, generation: int | None = None) -> None:
         if not (text or "").strip():
             raise AosError("comment is empty")
         with self._tx() as c:
             t = self._task_row(c, tid)
+            self._check_generation(t, generation)
             self._event(c, t["feature"], int(tid), "comment", author, text.strip())
 
     # -- task transitions ----------------------------------------------------
     def _version(self, c, feature: str) -> int:
         return c.execute("SELECT contract_version FROM features WHERE slug=?", (feature,)).fetchone()[0]
 
-    def claim(self, tid: int) -> dict:
+    def claim(self, tid: int, base_commit: str | None = None) -> dict:
+        """ready -> running. `base_commit`: the worktree HEAD the attempt starts from, so its
+        own commits can be verified (and later reverted) independently of earlier work."""
         with self._tx() as c:
             t = self._task_row(c, tid)
             self._transition(c, tid, ("ready",), "running", "dispatcher",
                              f"attempt {t['attempts'] + 1} started",
-                             attempts=t["attempts"] + 1, contract_seen=self._version(c, t["feature"]),
-                             started=now(), pid=None)
+                             attempts=t["attempts"] + 1, generation=t["generation"] + 1,
+                             contract_seen=self._version(c, t["feature"]), started=now(), pid=None,
+                             base_commit=base_commit, revert_to=None)
         return self.task(tid)
 
     def set_process(self, tid: int, pid: int | None, session_id: str | None,
@@ -296,25 +366,124 @@ class Board:
             t = self._task_row(c, tid)
             c.execute("UPDATE tasks SET contract_seen=? WHERE id=?", (self._version(c, t["feature"]), int(tid)))
 
-    def complete(self, tid: int, summary: str, author: str) -> None:
+    def complete(self, tid: int, summary: str, author: str, generation: int | None = None,
+                 to: str = "done") -> None:
+        """running -> done, or -> review when the dispatcher must verify the claim first."""
+        if to not in ("done", "review"):
+            raise AosError(f"cannot complete into {to!r}")
         if not (summary or "").strip():
             raise AosError("summary is empty", "say what changed, the commits, and how it was tested")
         with self._tx() as c:
             t = self._task_row(c, tid)
+            self._check_generation(t, generation)
             v = self._version(c, t["feature"])
             if t["status"] == "running" and (t["contract_seen"] or 0) < v:
                 raise AosError(f"contract changed (v{t['contract_seen']}→v{v}) since you last read it",
                                "call board_read or task_show, re-check your work against the new "
                                "contract, then complete")
-            self._transition(c, tid, ("running",), "done", author,
-                             f"done: {summary.strip().splitlines()[0][:120]}",
-                             result=summary.strip(), pid=None, note=None, resume=0)
+            first = summary.strip().splitlines()[0][:120]
+            if to == "review":
+                self._transition(c, tid, ("running",), "review", author, f"claimed done, verifying: {first}",
+                                 result=summary.strip(), pid=None, review_stage=None, review_attempts=0)
+            else:
+                self._transition(c, tid, ("running",), "done", author, f"done: {first}",
+                                 result=summary.strip(), pid=None, note=None, resume=0,
+                                 resume_hint=0, last_failure=None, feedback=None)
             self._event(c, t["feature"], int(tid), "result", author, summary.strip())
 
-    def block(self, tid: int, reason: str, author: str) -> None:
+    def _accept(self, c, tid: int, detail: str, author: str, kind: str) -> None:
+        t = self._transition(c, tid, ("review",), "done", author, f"done: {detail[:160]}",
+                             note=None, resume=0, resume_hint=0, last_failure=None, feedback=None,
+                             review_stage=None, review_attempts=0)
+        self._event(c, t["feature"], int(tid), kind, author, detail)
+
+    def _reject(self, c, tid: int, findings: str, author: str) -> None:
+        t = self._task_row(c, tid)
+        repeated = bool(t["last_failure"]) and _same_failure(t["last_failure"], findings)
+        to = "failed" if repeated or t["attempts"] >= t["max_attempts"] else "ready"
+        why = " (same failure twice: retrying won't help)" if repeated else ""
+        self._transition(c, tid, ("review",), to, author, f"attempt {t['attempts']} not accepted{why} → {to}",
+                         feedback=findings, last_failure=findings, resume_hint=0,
+                         review_stage=None, review_attempts=0, revert_to=t["base_commit"])
+        self._event(c, t["feature"], int(tid), "rejected", author, findings)
+
+    def accept(self, tid: int, detail: str, author: str = "dispatcher", kind: str = "verified") -> None:
+        """review -> done: the claim was verified (and reviewed)."""
+        with self._tx() as c:
+            self._accept(c, tid, detail, author, kind)
+
+    def reject_review(self, tid: int, findings: str, author: str = "dispatcher") -> None:
+        """review -> ready (or failed): the claim did not hold up. The findings go to the
+        next attempt; the same findings twice end the task (loop detection)."""
+        with self._tx() as c:
+            self._reject(c, tid, findings, author)
+
+    # -- independent review (Kiro Crew: TaskRunner self-review of the actual diff) ----
+    def _in_review(self, c, tid: int, stage: str | None):
+        t = self._task_row(c, tid)
+        if t["status"] != "review" or t["review_stage"] != stage:
+            raise AosError(f"task #{tid} is not awaiting that review step "
+                           f"(status {t['status']}, review stage {t['review_stage']})")
+        return t
+
+    def mark_verified(self, tid: int, detail: str, author: str = "dispatcher") -> None:
+        """Verification passed; an independent reviewer is next."""
+        with self._tx() as c:
+            t = self._in_review(c, tid, None)
+            c.execute("UPDATE tasks SET review_stage='verified', updated=? WHERE id=?", (now(), int(tid)))
+            self._event(c, t["feature"], int(tid), "verified", author, detail)
+
+    def start_review(self, tid: int) -> dict:
+        """verified -> reviewing. The reviewer gets its own attempt token (generation)."""
+        with self._tx() as c:
+            t = self._in_review(c, tid, "verified")
+            c.execute("UPDATE tasks SET review_stage='reviewing', review_attempts=?, generation=?, updated=? "
+                      "WHERE id=?", (t["review_attempts"] + 1, t["generation"] + 1, now(), int(tid)))
+            self._event(c, t["feature"], int(tid), "status", "dispatcher",
+                        f"independent review {t['review_attempts'] + 1} started")
+        return self.task(tid)
+
+    def review_verdict(self, tid: int, ok: bool, text: str, generation: int | None = None,
+                       author: str | None = None) -> None:
+        if not (text or "").strip():
+            raise AosError("a review verdict needs a summary or findings")
+        who = author or f"review:{tid}"
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            self._check_generation(t, generation)
+            self._in_review(c, tid, "reviewing")
+            if ok:
+                self._accept(c, tid, f"reviewed: {text.strip()}", who, "reviewed")
+            else:
+                self._reject(c, tid, f"independent review: {text.strip()}", who)
+
+    def review_unfinished(self, tid: int, reason: str) -> None:
+        """The reviewer ended without a verdict. Try once more; after two such reviews accept
+        the verified work, visibly, rather than punish the worker for a flaky reviewer."""
+        with self._tx() as c:
+            t = self._in_review(c, tid, "reviewing")
+            if t["review_attempts"] >= 2:
+                self._accept(c, tid, f"accepted without independent review (reviewer failed twice: {reason})",
+                             "dispatcher", "review_skipped")
+            else:
+                c.execute("UPDATE tasks SET review_stage='verified', updated=? WHERE id=?", (now(), int(tid)))
+                self._event(c, t["feature"], int(tid), "status", "dispatcher",
+                            f"review {t['review_attempts']} ended without a verdict ({reason}); retrying")
+
+    def reviewable(self, feature: str | None = None) -> list[dict]:
+        """tasks waiting for verification/review, in open features."""
+        sql = ("SELECT t.* FROM tasks t JOIN features f ON f.slug=t.feature "
+               "WHERE t.status='review' AND f.status='open'")
+        params: list = []
+        if feature:
+            sql, params = sql + " AND t.feature=?", [feature]
+        return self._rows(sql + " ORDER BY t.id", params)
+
+    def block(self, tid: int, reason: str, author: str, generation: int | None = None) -> None:
         if not (reason or "").strip():
             raise AosError("block reason is empty")
         with self._tx() as c:
+            self._check_generation(self._task_row(c, tid), generation)
             t = self._transition(c, tid, ("todo", "ready", "running"), "blocked", author,
                                  f"blocked: {reason.strip()[:120]}", pid=None)
             self._event(c, t["feature"], int(tid), "blocker", author, reason.strip())
@@ -324,12 +493,17 @@ class Board:
             self._transition(c, tid, ("blocked",), "todo", author, "unblocked", note=note or None)
         self.promote()
 
-    def attempt_failed(self, tid: int, reason: str) -> None:
+    def attempt_failed(self, tid: int, reason: str, ran: bool = True) -> None:
+        """`ran`: the worker got as far as running, so the next attempt must inspect state
+        before redoing anything (resume hint). False for launch/startup failures."""
         with self._tx() as c:
             t = self._task_row(c, tid)
-            to = "failed" if t["attempts"] >= t["max_attempts"] else "ready"
+            repeated = bool(t["last_failure"]) and _same_failure(t["last_failure"], reason)
+            to = "failed" if repeated or t["attempts"] >= t["max_attempts"] else "ready"
+            why = " (same failure twice: retrying won't help)" if repeated else ""
             self._transition(c, tid, ("running",), to, "dispatcher",
-                             f"attempt {t['attempts']} failed: {reason} → {to}", pid=None)
+                             f"attempt {t['attempts']} failed: {reason}{why} → {to}", pid=None,
+                             last_failure=reason, resume_hint=1 if ran else t["resume_hint"])
 
     def retry(self, tid: int, note: str | None = None, worker: str | None = None,
               resume: bool = False, author: str = "human") -> None:
@@ -339,7 +513,7 @@ class Board:
                 raise AosError("--resume cannot switch worker tools", "retry without --resume to switch")
             self._transition(c, tid, ("failed", "blocked", "cancelled", "done", "ready"), "todo", author,
                              "retry requested" + (" (resume)" if resume else ""),
-                             attempts=0, note=note, resume=1 if resume else 0,
+                             attempts=0, last_failure=None, note=note, resume=1 if resume else 0,
                              worker=worker or t["worker"], pid=None)
         self.promote()
 
@@ -349,11 +523,12 @@ class Board:
                              author, "cancelled")
 
     # -- contract proposals --------------------------------------------------
-    def propose(self, tid: int, body: str, reason: str, author: str) -> int:
+    def propose(self, tid: int, body: str, reason: str, author: str, generation: int | None = None) -> int:
         if not (body or "").strip():
             raise AosError("proposal is empty")
         with self._tx() as c:
             t = self._task_row(c, tid)
+            self._check_generation(t, generation)
             cur = c.execute("INSERT INTO proposals(feature, task, body, reason, status) VALUES (?,?,?,?,?)",
                             (t["feature"], int(tid), body.strip(), (reason or "").strip(), "pending"))
             pid = cur.lastrowid

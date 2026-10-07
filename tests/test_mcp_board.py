@@ -56,7 +56,7 @@ def test_worker_complete_refused_until_seen(worker):
     read = w.board_read()
     assert read["contract_version"] == 2 and any(e["kind"] == "contract" for e in read["events"])
     assert w.task_complete("all done")["ok"]
-    assert board.task(tid)["status"] == "done"
+    assert board.task(tid)["status"] == "review"  # verified by the dispatcher next
 
 
 def test_worker_block(worker):

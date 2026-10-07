@@ -43,6 +43,7 @@ You run the whole flow in this conversation. The user only steps in for decision
     - **timeout**: still working. Give at most a one-line progress note (counts), then `board_wait` again.
     - **waiting_on_human**: nothing can run until the user answers what is listed in `pending`. Remind them briefly and stop.
     - **finished**: go to step 12.
+    - If, while workers run, the user wants to change a task's direction ("use v2", "skip the migration"), call `task_steer(task, message)`. The worker gets it at its next check. Then keep waiting.
 11. When the user answers, act on each decision, then `board_start(feature)` and back to step 10:
     - `task_unblock(task, note=<their answer>)`;
     - `task_retry(task, note=<their guidance>)` or `task_cancel(task)`;

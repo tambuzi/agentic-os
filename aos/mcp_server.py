@@ -116,22 +116,41 @@ WORKER_TOOLS = {"task_show", "board_read", "task_comment", "task_block", "task_p
                 "task_create", "task_complete"}
 PLANNER_TOOLS = {"feature_create", "feature_show", "task_create", "board_read", "board_start", "board_status",
                  "task_unblock", "task_retry", "task_cancel", "proposal_decide", "feature_workflow",
-                 "board_wait"}
+                 "board_wait", "task_steer"}
 
 
 class BoardTools:
     """Board access over MCP. With task_id: a worker's tools for its own task.
     Without: planner tools for creating features and tasks."""
 
-    def __init__(self, aos: AOS, task_id: int | None = None):
+    def __init__(self, aos: AOS, task_id: int | None = None, attempt: int | None = None,
+                 review: bool = False):
         self.aos = aos
         self.board = Board(aos.data, aos.settings["board"]["max_tasks_per_feature"])
         self.task_id = int(task_id) if task_id is not None else None
+        # attempt token: the generation this worker was launched for (None = unchecked)
+        self.attempt = int(attempt) if attempt is not None else None
+        self.review = bool(review)  # reviewer mode: judge the task, never complete it
         self.wait_poll_s = 3.0
 
     @property
     def author(self) -> str:
-        return f"task:{self.task_id}" if self.task_id else "planner"
+        if self.task_id:
+            return f"review:{self.task_id}" if self.review else f"task:{self.task_id}"
+        return "planner"
+
+    # -- reviewer mode ---------------------------------------------------------
+    @_safe
+    def review_pass(self, summary: str) -> dict:
+        tid = self._own()["id"]
+        self.board.review_verdict(tid, True, summary, generation=self.attempt, author=self.author)
+        return {"ok": True, "status": self.board.task(tid)["status"]}
+
+    @_safe
+    def review_fail(self, findings: str) -> dict:
+        tid = self._own()["id"]
+        self.board.review_verdict(tid, False, findings, generation=self.attempt, author=self.author)
+        return {"ok": True, "status": self.board.task(tid)["status"]}
 
     def _own(self) -> dict:
         if not self.task_id:
@@ -154,45 +173,60 @@ class BoardTools:
         self.board.mark_seen(t["id"])
         return {"task": t, "feature": self.board.feature(t["feature"]), "brief": self.board.brief(t["feature"]),
                 "contract": self.board.contract(t["feature"]),
-                "depends_on": self.board.dependency_results(t["id"])}
+                "depends_on": self.board.dependency_results(t["id"]),
+                "messages_for_you": self.board.steer_messages(t["id"])[-10:]}
 
     @_safe
     def task_comment(self, text: str) -> dict:
-        self.board.comment(self._own()["id"], text, self.author)
+        self.board.comment(self._own()["id"], text, self.author, generation=self.attempt)
         return {"ok": True}
 
     @_safe
     def task_block(self, reason: str) -> dict:
-        self.board.block(self._own()["id"], reason, self.author)
+        self.board.block(self._own()["id"], reason, self.author, generation=self.attempt)
         return {"ok": True, "message": "blocked; stop working on this task now"}
 
     @_safe
     def task_propose_contract(self, change: str, reason: str) -> dict:
-        pid = self.board.propose(self._own()["id"], change, reason, self.author)
+        pid = self.board.propose(self._own()["id"], change, reason, self.author, generation=self.attempt)
         return {"proposal": pid, "message": "a human will decide; continue with parts the change doesn't affect"}
 
     @_safe
     def task_complete(self, summary: str) -> dict:
-        self.board.complete(self._own()["id"], summary, self.author)
-        return {"ok": True}
+        verify = bool(self.aos.settings["board"].get("verify", True))
+        tid = self._own()["id"]
+        self.board.complete(tid, summary, self.author, generation=self.attempt,
+                            to="review" if verify else "done")
+        if verify:
+            return {"ok": True, "status": "review",
+                    "message": "claim recorded; the board verifies your commits (and tests) before it counts "
+                               "as done. Stop working on this task now."}
+        return {"ok": True, "status": "done"}
 
     # -- both modes ----------------------------------------------------------
     @_safe
     def board_read(self, feature: str | None = None, since_event: int = 0) -> dict:
+        messages = None
         if self.task_id:
             t = self._own()
             feature = t["feature"]
             self.board.mark_seen(t["id"])
+            messages = self.board.steer_messages(t["id"], since_event)
         if not feature:
             raise AosError("feature is required")
-        return {"events": self.board.events(feature, since_event),
-                "contract_version": self.board.feature(feature)["contract_version"]}
+        out = {"events": self.board.events(feature, since_event),
+               "contract_version": self.board.feature(feature)["contract_version"]}
+        if messages is not None:
+            out["messages_for_you"] = messages  # from the user: follow them
+        return out
 
     @_safe
     def task_create(self, project: str, title: str, spec: str = "", depends_on: list[int] | None = None,
                     feature: str | None = None) -> dict:
         if self.task_id:
-            feature = self._own()["feature"]
+            own = self._own()
+            Board._check_generation(own, self.attempt)
+            feature = own["feature"]
         if not feature:
             raise AosError("feature is required")
         return self._new_task(feature, project, title, spec, depends_on)
@@ -250,8 +284,10 @@ class BoardTools:
                         "contract_version": f["contract_version"]},
             "dispatcher": dispatcher_status(self.board.data),
             "counts": counts,
+            "cost_usd": round(self.board.feature_cost(feature), 4),
             "tasks": [{"id": t["id"], "project": t["project"], "title": t["title"], "status": t["status"],
                        "worker": t["worker"], "attempts": t["attempts"],
+                       "cost_usd": round(self.board.task_cost(t["id"]), 4),
                        "result": (t["result"] or "").splitlines()[0] if t["result"] else None} for t in tasks],
             "blocked": [{"task": t["id"], "project": t["project"], "reason": blockers.get(t["id"], "")}
                         for t in tasks if t["status"] == "blocked"],
@@ -293,9 +329,10 @@ class BoardTools:
                         "tasks": [{"task": t["id"], "project": t["project"], "title": t["title"],
                                    "status": t["status"], "result": t["result"]} for t in tasks]}
             running = dispatcher_status(self.board.data)["running"]
-            if not running and self.board.dispatchable(feature):
+            if not running and (self.board.dispatchable(feature) or self.board.reviewable(feature)):
                 return {"reason": "stalled", "counts": counts, "cursor": new_cursor,
-                        "message": "ready tasks but no dispatcher: call board_start, then board_wait again"}
+                        "message": "tasks are ready or waiting to be verified but no dispatcher is running: "
+                                   "call board_start, then board_wait again"}
             if not running and not any(t["status"] in ("running", "ready") for t in tasks):
                 return {"reason": "waiting_on_human", "counts": counts, "cursor": new_cursor,
                         "pending": [info for _, info in attention.values()],
@@ -309,6 +346,11 @@ class BoardTools:
     def _status(self, tid: int) -> dict:
         t = self.board.task(tid)
         return {"task": t["id"], "status": t["status"]}
+
+    @_safe
+    def task_steer(self, task: int, message: str) -> dict:
+        self.board.steer(task, message, author="human")
+        return {"ok": True, "message": "the worker gets it at its next board_read"}
 
     @_safe
     def task_unblock(self, task: int, note: str = "") -> dict:
@@ -432,6 +474,27 @@ def build_server(tools: Tools, board_tools: BoardTools | None = None):
 
 
 def _register_board_tools(mcp, bt: BoardTools) -> None:
+    if bt.task_id and bt.review:
+        @mcp.tool()
+        def task_show() -> dict:
+            """The task under review: spec, feature brief, current contract, dependency results."""
+            return bt.task_show()
+
+        @mcp.tool()
+        def board_read(since_event: int = 0) -> dict:
+            """The feature timeline (what the worker and others reported)."""
+            return bt.board_read(since_event=since_event)
+
+        @mcp.tool()
+        def review_pass(summary: str) -> dict:
+            """Verdict: the task is done as specified. Summarise what you checked."""
+            return bt.review_pass(summary)
+
+        @mcp.tool()
+        def review_fail(findings: str) -> dict:
+            """Verdict: not done. Concrete, actionable findings (file:line, what is wrong, what is expected)."""
+            return bt.review_fail(findings)
+        return
     if bt.task_id:
         @mcp.tool()
         def task_show() -> dict:
@@ -500,6 +563,11 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
             return bt.board_wait(feature, cursor, timeout_sec)
 
         @mcp.tool()
+        def task_steer(task: int, message: str) -> dict:
+            """Send the user's guidance to a task's worker while it works (it reads it at its next board_read)."""
+            return bt.task_steer(task, message)
+
+        @mcp.tool()
         def task_unblock(task: int, note: str = "") -> dict:
             """Unblock a task with the human's answer (the note is passed to the worker)."""
             return bt.task_unblock(task, note)
@@ -530,7 +598,8 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
             return bt.board_status(feature)
 
 
-def run_server(project: str | Path, task: int | None = None) -> None:
+def run_server(project: str | Path, task: int | None = None, attempt: int | None = None,
+               review: bool = False) -> None:
     from .link import sync
 
     cfg = load_user_config()
@@ -544,7 +613,7 @@ def run_server(project: str | Path, task: int | None = None) -> None:
 
     aos = AOS(repo, slug=slug)
     tools = Tools(aos, on_skills_changed=resync)
-    board_tools = BoardTools(aos, task_id=task)
+    board_tools = BoardTools(aos, task_id=task, attempt=attempt, review=review)
     cwd = os.getcwd()
     os.chdir(Path.home())  # FastMCP reads .env from cwd; keep project env files out of it
     try:
