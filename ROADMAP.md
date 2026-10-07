@@ -12,49 +12,49 @@ What's planned next, in rough order.
 
 Several items borrow from [Kiro Crew](https://github.com/kirodotdev/kirocrew)'s worker design. The spec named in each item is the Crew document that describes the original pattern.
 
-## 1. Board hardening (next)
+## 1. Board hardening ✅ (done 2026-10-07)
 
 Small, contained changes to the current dispatcher and board.
 
 ### Quality gates
-- [ ] **Independent diff review before "done".**
+- [x] **Independent diff review before "done".**
   - `task_complete` moves a task to a new `review` status.
   - A separate reviewer (same tool, fresh session, same worktree) checks only this task's commits against the spec and the current contract, and runs the tests. It answers `review_pass` or `review_fail`.
   - Pass → `done`, and dependent tasks are unblocked.
   - Setting: `board.review: true`. *(Crew: TaskRunner self-review, `taskrunner.md`)*
-- [ ] **Revert and retry on a failed review.**
+- [x] **Revert and retry on a failed review.**
   - Reset the worktree to the task's starting commit, which is safe because one task holds a worktree at a time. Reverted commits stay in git's reflog.
   - Requeue with the findings as the note.
   - When attempts run out → `failed`, shown to the user as "needs attention".
-- [ ] **Verify claims before review.**
+- [x] **Verify claims before review.**
   - Don't take `task_complete` at its word: check the task actually added commits, and run an optional per-project test command first.
   - *(Crew: pipeline conductor's independent verification, `pipeline-conductor.md`)*
-- [ ] **Stop repeated failures.** If an attempt fails for the same reason as the previous one (same error or same review findings), go to `failed` with "same failure twice" instead of retrying. *(Crew: TaskRunner loop detection)*
+- [x] **Stop repeated failures.** If an attempt fails for the same reason as the previous one (same error or same review findings), go to `failed` with "same failure twice" instead of retrying. *(Crew: TaskRunner loop detection)*
 
 ### Execution safety
-- [ ] **Attempt token.**
+- [x] **Attempt token.**
   - Every claim gets a new generation, and workers' MCP servers start with `--task N --attempt K`.
   - The board refuses calls from an older attempt, so a worker that outlived its attempt can't complete or block the next one.
   - *(Crew: claim, lease and generation, `taskq.md`)*
-- [ ] **Resume hint.** When a retry follows a crash or timeout mid-step, the prompt says "a previous attempt may have partly run; inspect the repository and board state first", so side effects aren't repeated. *(Crew: `resume_hint`, `taskrunner.md`)*
-- [ ] **Parallelism sized by free memory.**
+- [x] **Resume hint.** When a retry follows a crash or timeout mid-step, the prompt says "a previous attempt may have partly run; inspect the repository and board state first", so side effects aren't repeated. *(Crew: `resume_hint`, `taskrunner.md`)*
+- [x] **Parallelism sized by free memory.**
   - `board.parallel: auto` = (free memory − `min_free_memory_gb`) / `worker_memory_gb`, kept between 1 and the configured maximum.
   - Check before every launch; a fixed number still works.
   - *(Crew: memory-based admission, `subagent.md`)*
-- [ ] **Stagger cold starts.** Space worker launches out a little, so several workers don't start their MCP servers at the same instant. *(Crew: spawn stagger)*
+- [x] **Stagger cold starts.** Space worker launches out a little, so several workers don't start their MCP servers at the same instant. *(Crew: spawn stagger)*
 
 ### Visibility and control
-- [ ] **Cost per attempt and budgets.**
+- [x] **Cost per attempt and budgets.**
   - Record each attempt's cost (Claude: `--output-format json` reports it; Kiro: to investigate).
   - Show it in `board_status` and `aos board`.
   - Optional per-task and per-feature budgets that stop dispatching when reached.
   - *(Crew: per-item credit budgets)*
-- [ ] **Steer a running worker.**
+- [x] **Steer a running worker.**
   - `aos task steer <id> "message"` and a `task_steer` MCP tool, so `aos-feature` can relay the user's words.
   - Delivered as a `messages_for_you` field at the worker's next `board_read`.
   - Real mid-turn steering comes with ACP (section 2).
 
-## 2. ACP worker sessions (after a spike)
+## 2. ACP worker sessions (next, after a spike)
 
 Replace one-shot `claude -p` / `kiro-cli chat --no-interactive` runs with **live sessions over ACP** (Agent Client Protocol), which both Kiro and Claude (through an adapter) speak. *(Crew: `agent_sdk/backends.py`, `subagent.md`)*
 
