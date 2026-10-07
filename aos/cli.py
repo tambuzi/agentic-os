@@ -37,6 +37,10 @@ def cmd_init(a) -> int:
     cfg["repo"] = str(repo)
     if a.graphskill:
         cfg["graphskill_cmd"] = shlex.split(a.graphskill)
+    if a.worker:
+        from .workers.common import profile_settings
+        profile_settings(AOS(repo), a.worker, "")  # validates the tool name
+        cfg["worker"] = a.worker
     if a.data_dir:
         data = Path(a.data_dir).expanduser().resolve()
         if data == repo or repo in data.parents:
@@ -189,7 +193,10 @@ def cmd_feature(a) -> int:
         _check_projects(aos, projects)
         brief = f"# {a.title}\n\n## Goal\n\n## Projects\n" + "".join(f"- {p}\n" for p in projects)
         contract = "# Contract\n\nAPIs, events and schemas shared between the projects.\n"
-        board.create_feature(a.slug, a.title, brief, contract)
+        if a.worker:
+            from .workers.common import profile_settings
+            profile_settings(aos, a.worker, "")  # validates the tool name
+        board.create_feature(a.slug, a.title, brief, contract, worker=a.worker)
         d = board.feature_dir(a.slug)
         print(f"feature {a.slug} created\n  edit: {d / 'brief.md'}\n  edit: {d / 'contract.md'}")
         print(f"then: aos task add {a.slug} <project> \"<title>\" [--after ids]   or ask the agent to deliver it (aos-feature skill)")
@@ -242,12 +249,29 @@ def cmd_feature(a) -> int:
     return 0
 
 
+def cmd_worker(a) -> int:
+    from .workers.common import profile_settings, resolve_tool
+    aos = AOS(repo_root())
+    if a.tool:
+        profile_settings(aos, a.tool, "")  # validates the tool name
+        cfg = load_user_config()
+        cfg["worker"] = a.tool
+        save_user_config(cfg)
+        print(f"board work now uses {a.tool} by default on this machine "
+              "(projects, features or tasks can still override it)")
+        return 0
+    tool, source = resolve_tool(aos, "")
+    transport = (aos.settings["workers"].get(tool) or {}).get("transport", "cli")
+    print(f"{tool} ({transport}), from {source}")
+    return 0
+
+
 def cmd_task(a) -> int:
     from .workers.common import profile_settings, resolve_profile
     aos, board = _board_ctx()
     if a.action == "add":
         _check_projects(aos, [a.project])
-        profile = resolve_profile(aos, a.project, a.worker)
+        profile = resolve_profile(aos, a.project, a.worker, board.feature(a.feature).get("worker"))
         attempts = profile_settings(aos, profile, a.project)["max_attempts"]
         spec = Path(a.spec_file).read_text() if a.spec_file else ""
         deps = a.after or []
@@ -331,7 +355,8 @@ def cmd_board(a) -> int:
         from .dispatcher import Dispatcher
         repo = repo_root()
         print("dispatching (Ctrl-C to stop launching; twice to stop workers)" if not a.once else "dispatching once")
-        Dispatcher(repo, feature=a.feature, parallel=a.parallel).run(once=a.once, until_done=a.until_done)
+        Dispatcher(repo, feature=a.feature, parallel=a.parallel, worker=a.worker).run(
+            once=a.once, until_done=a.until_done)
         return 0
     from .dispatcher import dispatcher_status
     _, board = _board_ctx()
@@ -353,7 +378,8 @@ def cmd_board(a) -> int:
                 blk = [e for e in board.events(f["slug"]) if e["task"] == t["id"] and e["kind"] == "blocker"]
                 extra = f"  {blk[-1]['body'][:80]}" if blk else ""
             cost = board.task_cost(t["id"])
-            print(f"  #{t['id']:<4} {t['project']:<14} {t['status']:<10} {t['attempts']}/{t['max_attempts']}"
+            tool = f"{t['worker']}/{t.get('transport') or '-'}"
+            print(f"  #{t['id']:<4} {t['project']:<14} {t['status']:<10} {tool:<11} {t['attempts']}/{t['max_attempts']}"
                   f"{f'  ${cost:.2f}' if cost else ''}  {t['title']}{extra}")
         for p in board.proposals(f["slug"], "pending"):
             print(f"  proposal #{p['id']} pending: {p['reason']}  (aos feature approve|reject {p['id']})")
@@ -382,7 +408,12 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("repo", nargs="?", default=".")
     s.add_argument("--graphskill", help="command that runs graphskill, e.g. '/path/.venv/bin/python -m graphskill'")
     s.add_argument("--data-dir", help="local business data dir (default: ~/.agenticos/data); never inside the repo")
+    s.add_argument("--worker", help="your agent tool for board work: claude or kiro (same as `aos worker`)")
     s.set_defaults(fn=cmd_init)
+
+    s = sub.add_parser("worker", help="show or set your agent tool for board work (claude | kiro)")
+    s.add_argument("tool", nargs="?")
+    s.set_defaults(fn=cmd_worker)
 
     s = sub.add_parser("link", help="make a project agenticOS-aware")
     s.add_argument("project", nargs="?", default=".")
@@ -421,6 +452,7 @@ def _parser() -> argparse.ArgumentParser:
     f.add_argument("slug")
     f.add_argument("--title", required=True)
     f.add_argument("--projects", help="comma-separated linked project slugs")
+    f.add_argument("--worker", help="claude|kiro for this feature only (default: your `aos worker` setting)")
     fsub.add_parser("list")
     for name in ("show", "done", "cancel"):
         fsub.add_parser(name).add_argument("slug")
@@ -474,6 +506,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--once", action="store_true", help="one round: launch what is ready, wait for it, exit")
     s.add_argument("--until-done", action="store_true",
                    help="keep dispatching, exit when nothing more can run (finished, or waiting on a human)")
+    s.add_argument("--worker", help="run: launch every task with this tool (claude|kiro) and record the switch")
     s.set_defaults(fn=cmd_board)
     sub.add_parser("status", help="uncommitted agenticOS changes").set_defaults(fn=cmd_status)
     sub.add_parser("doctor", help="check installation").set_defaults(fn=cmd_doctor)

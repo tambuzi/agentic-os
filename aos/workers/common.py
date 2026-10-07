@@ -56,8 +56,27 @@ def _project_worker(aos: AOS, project: str) -> dict:
     return ((aos.projects().get(project) or {}).get("worker")) or {}
 
 
-def resolve_profile(aos: AOS, project: str, requested: str | None = None) -> str:
-    return requested or _project_worker(aos, project).get("profile") or aos.settings["board"]["default_worker"]
+def resolve_tool(aos: AOS, project: str, requested: str | None = None,
+                 feature_worker: str | None = None) -> tuple[str, str]:
+    """(profile, where it came from). Precedence: task > feature > project > the user's
+    global setting (`aos worker`) > the team's board.default_worker."""
+    from ..config import global_worker
+    if requested:
+        return requested, "task"
+    if feature_worker:
+        return feature_worker, "feature"
+    project_profile = _project_worker(aos, project).get("profile")
+    if project_profile:
+        return project_profile, f"project {project}"
+    mine = global_worker()
+    if mine:
+        return mine, "global (aos worker)"
+    return aos.settings["board"]["default_worker"], "board default"
+
+
+def resolve_profile(aos: AOS, project: str, requested: str | None = None,
+                    feature_worker: str | None = None) -> str:
+    return resolve_tool(aos, project, requested, feature_worker)[0]
 
 
 def profile_settings(aos: AOS, profile: str, project: str) -> dict:

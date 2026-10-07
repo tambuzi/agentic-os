@@ -113,6 +113,11 @@ def check_slug(slug: str, kind: str = "project") -> None:
         raise AosError(f"invalid {kind} slug {slug!r}", "lowercase a-z, 0-9 and '-', max 64 chars")
 
 
+def global_worker(cfg: dict | None = None) -> str | None:
+    """The user's agent tool (`aos worker claude|kiro`): per machine, never in the repo."""
+    return (cfg if cfg is not None else load_user_config()).get("worker") or None
+
+
 def graphskill_cmd(cfg: dict | None = None) -> list[str] | None:
     cmd = (cfg if cfg is not None else load_user_config()).get("graphskill_cmd")
     if cmd:

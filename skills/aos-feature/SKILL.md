@@ -24,6 +24,12 @@ You run the whole flow in this conversation. The user only steps in for decision
    - add dependencies only where a consumer truly cannot proceed without the provider.
 7. Show the brief, contract and task list (`#n project title ← depends on`). Adjust until the user approves. **Do not create anything before approval.**
 
+**Which tool runs the workers?**
+- The user's global setting decides (`aos worker`; set once per machine).
+- Don't ask if it's set, or if the projects have their own default.
+- Only when nothing is set: ask once, "Claude or Kiro?", and suggest `aos worker <tool>` so it's never asked again.
+- Use `feature_create(..., worker=)` only when the user wants a different tool for this one feature.
+
 ## 2. Create
 8. `feature_create(slug, title, brief, contract)`, then one `task_create(project, title, feature, spec, depends_on)` per task.
 

@@ -117,11 +117,12 @@ def _warn(msg: str) -> None:
 
 class Dispatcher:
     def __init__(self, repo: str | Path, *, feature: str | None = None, parallel: int | None = None,
-                 tick: float = 2.0):
+                 tick: float = 2.0, worker: str | None = None):
         self.aos = AOS(repo)
         board_cfg = self.aos.settings["board"]
         self.board = Board(self.aos.data, board_cfg["max_tasks_per_feature"])
         self.feature = feature
+        self.worker = worker  # run override: launch every task with this tool
         setting = parallel if parallel is not None else board_cfg["parallel"]
         # `auto`: the ceiling is max_parallel; free memory decides each start (see _may_start)
         self.parallel = int(board_cfg.get("max_parallel", 6) if str(setting) == "auto" else setting)
@@ -486,6 +487,9 @@ class Dispatcher:
 
     def _launch(self, t: dict) -> None:
         tid = t["id"]
+        if self.worker and t["worker"] != self.worker:
+            self.board.set_worker(tid, self.worker, why=" for this run (aos board run --worker)")
+            t = {**t, "worker": self.worker}
         over = self._over_budget(t)
         if over:
             self.board.block(tid, over, author="dispatcher")
