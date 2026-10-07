@@ -81,3 +81,21 @@ def test_fixed_number_and_unknown_memory(env, monkeypatch):
     write({"parallel": 2})
     assert run_tick(repo, monkeypatch, None)[0] == 2
     assert run_tick(repo, monkeypatch, 64.0)[0] == 2
+
+
+def test_starts_are_staggered(env, monkeypatch):
+    import time
+    repo, write = env
+    write({"parallel": 4, "start_stagger_sec": 0.4})
+    monkeypatch.setattr("aos.dispatcher.available_gb", lambda: 64.0)
+    d = Dispatcher(repo, tick=0.05)
+    try:
+        d.tick()
+        assert len(d.running) == 1          # a second start in the same instant is held
+        time.sleep(0.45)
+        d.tick()
+        assert len(d.running) == 2
+    finally:
+        for r in list(d.running.values()):
+            d._terminate(r)
+        d._reap()

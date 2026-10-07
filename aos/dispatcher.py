@@ -130,6 +130,8 @@ class Dispatcher:
         self.min_free_gb = float(board_cfg.get("min_free_memory_gb", 2.0))
         self.settle_s = 60.0
         self._held_reason = ""
+        self.stagger_s = float(board_cfg.get("start_stagger_sec", 2.0))
+        self._last_start = float("-inf")
         self.tick_s = tick
         self.grace_s = 30.0
         self.running: dict[int, Running] = {}
@@ -385,6 +387,8 @@ class Dispatcher:
         n = len(self.running)
         if n >= self.parallel:
             return False
+        if time.monotonic() - self._last_start < self.stagger_s:
+            return False  # stagger cold starts: each one spawns its MCP servers too
         if n == 0:
             return True
         free = available_gb()
@@ -447,6 +451,7 @@ class Dispatcher:
         self.running[tid] = Running(proc, launch, time.monotonic() + 60 * timeout, timeout, log,
                                     getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"],
                                     kind="reviewer", generation=task["generation"], started_at=time.monotonic())
+        self._last_start = time.monotonic()
 
     def _launch(self, t: dict) -> None:
         tid = t["id"]
@@ -481,4 +486,5 @@ class Dispatcher:
         self.running[tid] = Running(proc, launch, time.monotonic() + 60 * timeout, timeout, log,
                                     getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"],
                                     generation=task["generation"], started_at=time.monotonic())
+        self._last_start = time.monotonic()
         self.board.set_process(tid, proc.pid, launch.session_id, proc_start=process_start(proc.pid))

@@ -87,3 +87,6 @@ def plenty_of_memory(monkeypatch):
     """Dispatcher tests must not depend on this machine's free memory; memory-gating tests
     set their own value."""
     monkeypatch.setattr("aos.dispatcher.available_gb", lambda: 64.0)
+    # tests launch several workers per tick; the stagger has its own test
+    from aos.config import DEFAULTS
+    monkeypatch.setitem(DEFAULTS["board"], "start_stagger_sec", 0)
