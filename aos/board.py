@@ -41,6 +41,9 @@ CREATE TABLE IF NOT EXISTS events(
 CREATE TABLE IF NOT EXISTS proposals(
   id INTEGER PRIMARY KEY AUTOINCREMENT, feature TEXT NOT NULL, task INTEGER, body TEXT NOT NULL,
   reason TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', decided TEXT);
+CREATE TABLE IF NOT EXISTS costs(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, task INTEGER NOT NULL, feature TEXT NOT NULL,
+  generation INTEGER, role TEXT NOT NULL, usd REAL NOT NULL, ts TEXT NOT NULL);
 """
 
 
@@ -288,6 +291,22 @@ class Board:
             raise AosError(f"stale worker: you belong to attempt {generation}, but task #{t['id']} is now on "
                            f"attempt {t['generation']} ({t['status']})",
                            "stop working on this task; another attempt owns it now")
+
+    # -- cost (Kiro Crew: per-item credit budgets) --------------------------------
+    def add_cost(self, tid: int, usd: float, role: str = "worker", generation: int | None = None) -> None:
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            c.execute("INSERT INTO costs(task, feature, generation, role, usd, ts) VALUES (?,?,?,?,?,?)",
+                      (int(tid), t["feature"], generation, role, float(usd), now()))
+
+    def costs(self, tid: int) -> list[dict]:
+        return self._rows("SELECT * FROM costs WHERE task=? ORDER BY id", (int(tid),))
+
+    def task_cost(self, tid: int) -> float:
+        return self._rows("SELECT COALESCE(SUM(usd), 0) AS s FROM costs WHERE task=?", (int(tid),))[0]["s"]
+
+    def feature_cost(self, feature: str) -> float:
+        return self._rows("SELECT COALESCE(SUM(usd), 0) AS s FROM costs WHERE feature=?", (feature,))[0]["s"]
 
     def log_event(self, tid: int, kind: str, body: str, author: str = "dispatcher") -> None:
         """A system event on a task's timeline (no state change)."""

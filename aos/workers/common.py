@@ -152,6 +152,22 @@ def prepare_run(aos: AOS, board: Board, task: dict, worktree: Path, project_path
     return spec, settings
 
 
+def parse_cost(log_text: str) -> float | None:
+    """The run's cost in USD from its output, if the tool reports one: `claude -p
+    --output-format json` ends with a result object carrying `total_cost_usd`."""
+    for line in reversed(log_text.splitlines()):
+        line = line.strip()
+        if not (line.startswith("{") and "total_cost_usd" in line):
+            continue
+        try:
+            value = json.loads(line).get("total_cost_usd")
+        except (json.JSONDecodeError, AttributeError):
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
 def write_mcp_config(spec: RunSpec) -> Path:
     path = spec.run_dir / "mcp.json"
     write_atomic(path, json.dumps({"mcpServers": spec.mcp_servers}, indent=2) + "\n")

@@ -278,8 +278,10 @@ class BoardTools:
                         "contract_version": f["contract_version"]},
             "dispatcher": dispatcher_status(self.board.data),
             "counts": counts,
+            "cost_usd": round(self.board.feature_cost(feature), 4),
             "tasks": [{"id": t["id"], "project": t["project"], "title": t["title"], "status": t["status"],
                        "worker": t["worker"], "attempts": t["attempts"],
+                       "cost_usd": round(self.board.task_cost(t["id"]), 4),
                        "result": (t["result"] or "").splitlines()[0] if t["result"] else None} for t in tasks],
             "blocked": [{"task": t["id"], "project": t["project"], "reason": blockers.get(t["id"], "")}
                         for t in tasks if t["status"] == "blocked"],

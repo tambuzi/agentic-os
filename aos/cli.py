@@ -339,7 +339,9 @@ def cmd_board(a) -> int:
     for f in board.features():
         if a.feature and f["slug"] != a.feature:
             continue
-        print(f"{f['slug']} [{f['status']}] contract v{f['contract_version']}: {f['title']}")
+        spent = board.feature_cost(f["slug"])
+        print(f"{f['slug']} [{f['status']}] contract v{f['contract_version']}: {f['title']}"
+              + (f"  (${spent:.2f})" if spent else ""))
         for t in board.tasks(feature=f["slug"]):
             extra = ""
             if t["id"] in stuck:
@@ -347,7 +349,9 @@ def cmd_board(a) -> int:
             elif t["status"] == "blocked":
                 blk = [e for e in board.events(f["slug"]) if e["task"] == t["id"] and e["kind"] == "blocker"]
                 extra = f"  {blk[-1]['body'][:80]}" if blk else ""
-            print(f"  #{t['id']:<4} {t['project']:<14} {t['status']:<10} {t['attempts']}/{t['max_attempts']}  {t['title']}{extra}")
+            cost = board.task_cost(t["id"])
+            print(f"  #{t['id']:<4} {t['project']:<14} {t['status']:<10} {t['attempts']}/{t['max_attempts']}"
+                  f"{f'  ${cost:.2f}' if cost else ''}  {t['title']}{extra}")
         for p in board.proposals(f["slug"], "pending"):
             print(f"  proposal #{p['id']} pending: {p['reason']}  (aos feature approve|reject {p['id']})")
     return 0

@@ -10,6 +10,12 @@ from aos.config import data_root
 
 tid = int(sys.argv[1])
 role = sys.argv[2] if len(sys.argv) > 2 else "worker"
+if os.environ.get("FAKE_COST"):  # what `claude -p --output-format json` prints at the end
+    import atexit
+    import json as _json
+    atexit.register(lambda: print(_json.dumps({"type": "result", "total_cost_usd": float(
+        os.environ.get("FAKE_REVIEW_COST" if role == "reviewer" else "FAKE_COST", os.environ["FAKE_COST"]))}),
+        flush=True))
 if role == "reviewer":
     from aos.board import Board as _B
     from aos.config import data_root as _dr

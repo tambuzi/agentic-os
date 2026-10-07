@@ -28,7 +28,7 @@ from .board import Board
 from .core import AOS
 from .errors import AosError
 from .workers import adapter
-from .workers.common import Launch, linked_project_path, prepare_review, prepare_run
+from .workers.common import Launch, linked_project_path, parse_cost, prepare_review, prepare_run
 from .sysmem import available_gb
 from .verify import head_commit, revert_to, verify_claim
 from .worktrees import branch_name, ensure_worktree, worktree_path
@@ -52,6 +52,7 @@ class Running:
     finished_at: float | None = None  # when the task left `running` while the process lived on
     kind: str = "worker"              # or "reviewer"
     started_at: float = 0.0           # monotonic; recent starts reserve memory they haven't used yet
+    log_path: Path | None = None      # the run's output, read for its cost when it exits
     generation: int = 0               # the attempt token it was launched with
 
 
@@ -335,6 +336,7 @@ class Dispatcher:
         r.launch.cleanup()
         r.log.close()
         del self.running[tid]
+        self._record_cost(tid, r)
         task = self.board.task(tid)
         if not self._still_owns(r, task):
             return
@@ -353,6 +355,34 @@ class Dispatcher:
         else:
             why = f"exited with code {code}"
         self.board.attempt_failed(tid, why)
+
+    def _record_cost(self, tid: int, r: Running) -> None:
+        if not r.log_path:
+            return
+        try:
+            with open(r.log_path, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                fh.seek(max(0, fh.tell() - 262_144))
+                usd = parse_cost(fh.read().decode("utf-8", errors="replace"))
+        except OSError:
+            return
+        if usd is not None:
+            self.board.add_cost(tid, usd, role=r.kind, generation=r.generation)
+
+    def _over_budget(self, t: dict) -> str | None:
+        cfg = self.aos.settings["board"]
+        task_budget, feature_budget = cfg.get("task_budget_usd"), cfg.get("feature_budget_usd")
+        if task_budget is not None:
+            spent = self.board.task_cost(t["id"])
+            if spent >= float(task_budget):
+                return (f"task budget reached: ${spent:.2f} of ${float(task_budget):.2f} spent; raise "
+                        "board.task_budget_usd in aos.yaml and unblock, or cancel the task")
+        if feature_budget is not None:
+            spent = self.board.feature_cost(t["feature"])
+            if spent >= float(feature_budget):
+                return (f"feature budget reached: ${spent:.2f} of ${float(feature_budget):.2f} spent on "
+                        f"{t['feature']}; raise board.feature_budget_usd in aos.yaml and unblock")
+        return None
 
     def _launch_ready(self) -> None:
         try:
@@ -450,11 +480,16 @@ class Dispatcher:
         timeout = float(self.aos.settings["board"].get("review_timeout_min", 15))
         self.running[tid] = Running(proc, launch, time.monotonic() + 60 * timeout, timeout, log,
                                     getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"],
-                                    kind="reviewer", generation=task["generation"], started_at=time.monotonic())
+                                    kind="reviewer", generation=task["generation"], started_at=time.monotonic(),
+                                    log_path=log_path)
         self._last_start = time.monotonic()
 
     def _launch(self, t: dict) -> None:
         tid = t["id"]
+        over = self._over_budget(t)
+        if over:
+            self.board.block(tid, over, author="dispatcher")
+            return
         try:
             project_path = linked_project_path(t["project"])
             wt = ensure_worktree(project_path, worktree_path(self.aos.home, t["feature"], t["project"]),
@@ -485,6 +520,7 @@ class Dispatcher:
         timeout = float(settings["timeout_min"])
         self.running[tid] = Running(proc, launch, time.monotonic() + 60 * timeout, timeout, log,
                                     getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"],
-                                    generation=task["generation"], started_at=time.monotonic())
+                                    generation=task["generation"], started_at=time.monotonic(),
+                                    log_path=log_path)
         self._last_start = time.monotonic()
         self.board.set_process(tid, proc.pid, launch.session_id, proc_start=process_start(proc.pid))

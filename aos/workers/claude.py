@@ -46,7 +46,8 @@ def prepare(spec: RunSpec, settings: dict) -> Launch:
     argv = [settings.get("bin") or "claude", "-p",
             "--append-system-prompt", _capped(read_text(spec.context_file)),
             "--mcp-config", str(mcp), "--strict-mcp-config",
-            "--permission-mode", "acceptEdits"]
+            "--permission-mode", "acceptEdits",
+            "--output-format", "json"]  # the final JSON reports total_cost_usd (aos records it)
     if settings.get("model"):
         argv += ["--model", str(settings["model"])]
     if spec.resume and spec.session_id:
