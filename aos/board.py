@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS tasks(
   worker TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL,
   contract_seen INTEGER, result TEXT, session_id TEXT, pid INTEGER, proc_start TEXT, note TEXT,
   generation INTEGER NOT NULL DEFAULT 0, resume_hint INTEGER NOT NULL DEFAULT 0, last_failure TEXT,
-  base_commit TEXT, feedback TEXT, review_stage TEXT, review_attempts INTEGER NOT NULL DEFAULT 0,
+  base_commit TEXT, feedback TEXT, review_stage TEXT, review_attempts INTEGER NOT NULL DEFAULT 0, revert_to TEXT,
   resume INTEGER NOT NULL DEFAULT 0, started TEXT, updated TEXT NOT NULL, created_by TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS deps(task INTEGER NOT NULL, depends_on INTEGER NOT NULL,
   PRIMARY KEY(task, depends_on));
@@ -87,7 +87,8 @@ class Board:
                            ("base_commit", "TEXT"),                           # verify: commits since claim
                            ("feedback", "TEXT"),                              # why a claim was rejected
                            ("review_stage", "TEXT"),                          # None | verified | reviewing
-                           ("review_attempts", "INTEGER NOT NULL DEFAULT 0")):  # reviewer launches
+                           ("review_attempts", "INTEGER NOT NULL DEFAULT 0"),  # reviewer launches
+                           ("revert_to", "TEXT")):                            # rejected work to undo
             if name not in cols:  # boards created before the column existed
                 c.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
         return c
@@ -288,6 +289,12 @@ class Board:
                            f"attempt {t['generation']} ({t['status']})",
                            "stop working on this task; another attempt owns it now")
 
+    def log_event(self, tid: int, kind: str, body: str, author: str = "dispatcher") -> None:
+        """A system event on a task's timeline (no state change)."""
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            self._event(c, t["feature"], int(tid), kind, author, body)
+
     def comment(self, tid: int, text: str, author: str, generation: int | None = None) -> None:
         if not (text or "").strip():
             raise AosError("comment is empty")
@@ -309,7 +316,7 @@ class Board:
                              f"attempt {t['attempts'] + 1} started",
                              attempts=t["attempts"] + 1, generation=t["generation"] + 1,
                              contract_seen=self._version(c, t["feature"]), started=now(), pid=None,
-                             base_commit=base_commit)
+                             base_commit=base_commit, revert_to=None)
         return self.task(tid)
 
     def set_process(self, tid: int, pid: int | None, session_id: str | None,
@@ -362,7 +369,7 @@ class Board:
         why = " (same failure twice: retrying won't help)" if repeated else ""
         self._transition(c, tid, ("review",), to, author, f"attempt {t['attempts']} not accepted{why} → {to}",
                          feedback=findings, last_failure=findings, resume_hint=0,
-                         review_stage=None, review_attempts=0)
+                         review_stage=None, review_attempts=0, revert_to=t["base_commit"])
         self._event(c, t["feature"], int(tid), "rejected", author, findings)
 
     def accept(self, tid: int, detail: str, author: str = "dispatcher", kind: str = "verified") -> None:

@@ -29,7 +29,7 @@ from .core import AOS
 from .errors import AosError
 from .workers import adapter
 from .workers.common import Launch, linked_project_path, prepare_review, prepare_run
-from .verify import head_commit, verify_claim
+from .verify import head_commit, revert_to, verify_claim
 from .worktrees import branch_name, ensure_worktree, worktree_path
 
 # Board-level failures for a single task (status moved under us, sqlite busy, ...)
@@ -424,6 +424,9 @@ class Dispatcher:
         except AosError as e:
             self.board.block(tid, e.message + (f" ({e.hint})" if e.hint else ""), author="dispatcher")
             return
+        if t.get("revert_to"):  # the previous attempt was rejected: start from its base again
+            ok, detail = revert_to(wt, t["revert_to"])
+            self.board.log_event(tid, "reverted" if ok else "status", detail)
         task = self.board.claim(tid, base_commit=head_commit(wt))  # raises if the task moved meanwhile
         launch = None
         try:

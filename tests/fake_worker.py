@@ -16,6 +16,11 @@ if role == "reviewer":
     _b = _B(_dr())
     _gen = _b.task(tid)["generation"]
     verdict = os.environ.get("FAKE_REVIEW", "pass")
+    if verdict == "fail_once":  # fail the first review of this task, pass the next
+        marker = Path(os.environ["FAKE_MARKER_DIR"]) / f"reviewed-{tid}"
+        verdict = "pass" if marker.exists() else "fail"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("x")
     if verdict == "pass":
         _b.review_verdict(tid, True, "looks right: spec and contract met", generation=_gen)
     elif verdict == "fail":
@@ -47,7 +52,8 @@ if mode in ("commit_complete", "nocommit_complete"):
     import subprocess
     if mode == "commit_complete":
         (Path.cwd() / f"t{tid}-{os.getpid()}.txt").write_text("work\n")
-        subprocess.run(["git", "add", "."], check=True)
+        (Path.cwd() / f"scratch-{tid}-{os.getpid()}.tmp").write_text("untracked leftover\n")
+        subprocess.run(["git", "add", f"t{tid}-{os.getpid()}.txt"], check=True)
         subprocess.run(["git", "commit", "-qm", f"task {tid}"], check=True)
     board.mark_seen(tid)
     board.complete(tid, f"claimed done by fake worker ({mode})", author=f"task:{tid}", to="review")

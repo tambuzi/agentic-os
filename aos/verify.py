@@ -22,6 +22,27 @@ def head_commit(worktree: Path) -> str | None:
     return r.stdout.strip() or None if r.returncode == 0 else None
 
 
+def revert_to(worktree: Path, sha: str) -> tuple[bool, str]:
+    """Undo a rejected attempt: reset the worktree to `sha` and remove untracked files
+    (ignored ones like node_modules stay). Only when `sha` is an ancestor of HEAD, so a
+    rewritten history is never clobbered. The old HEAD stays reachable via the reflog."""
+    worktree = Path(worktree)
+    head = head_commit(worktree)
+    if not head:
+        return False, "not reverted: cannot read the worktree's HEAD"
+    if _git(["merge-base", "--is-ancestor", sha, "HEAD"], worktree).returncode != 0:
+        return False, (f"not reverted: {sha[:12]} is not an ancestor of HEAD {head[:12]} "
+                       "(history changed); continuing from the current state")
+    for args in (["reset", "--hard", sha], ["clean", "-fd"]):
+        r = _git(args, worktree)
+        if r.returncode != 0:
+            return False, f"not reverted: git {' '.join(args)} failed: {r.stderr.strip()}"
+    if head == sha:
+        return True, f"cleaned the worktree at {sha[:12]} (no commits to undo)"
+    return True, (f"reverted the rejected attempt: {head[:12]} -> {sha[:12]} "
+                  f"(recover it with: git reset --hard {head})")
+
+
 def _tail(text: str, lines: int = 40) -> str:
     return "\n".join(text.strip().splitlines()[-lines:])
 
