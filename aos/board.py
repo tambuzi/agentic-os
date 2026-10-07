@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS proposals(
   reason TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', decided TEXT);
 CREATE TABLE IF NOT EXISTS costs(
   id INTEGER PRIMARY KEY AUTOINCREMENT, task INTEGER NOT NULL, feature TEXT NOT NULL,
-  generation INTEGER, role TEXT NOT NULL, usd REAL NOT NULL, ts TEXT NOT NULL);
+  generation INTEGER, role TEXT NOT NULL, usd REAL NOT NULL, ts TEXT NOT NULL,
+  unit TEXT NOT NULL DEFAULT 'USD');  -- usd holds the amount; unit is USD or credit
 """
 
 
@@ -81,6 +82,8 @@ class Board:
         c.execute("PRAGMA busy_timeout=5000")
         c.execute("PRAGMA journal_mode=WAL")
         c.executescript(SCHEMA)
+        if "unit" not in {r["name"] for r in c.execute("PRAGMA table_info(costs)")}:
+            c.execute("ALTER TABLE costs ADD COLUMN unit TEXT NOT NULL DEFAULT 'USD'")  # credits (Kiro)
         if "worker" not in {r["name"] for r in c.execute("PRAGMA table_info(features)")}:
             c.execute("ALTER TABLE features ADD COLUMN worker TEXT")  # feature default tool
         cols = {r["name"] for r in c.execute("PRAGMA table_info(tasks)")}
@@ -296,20 +299,24 @@ class Board:
                            "stop working on this task; another attempt owns it now")
 
     # -- cost (Kiro Crew: per-item credit budgets) --------------------------------
-    def add_cost(self, tid: int, usd: float, role: str = "worker", generation: int | None = None) -> None:
+    def add_cost(self, tid: int, usd: float, role: str = "worker", generation: int | None = None,
+                 unit: str = "USD") -> None:
+        """Record an attempt's cost. `usd` is the amount, in `unit` (USD, or credit for Kiro)."""
         with self._tx() as c:
             t = self._task_row(c, tid)
-            c.execute("INSERT INTO costs(task, feature, generation, role, usd, ts) VALUES (?,?,?,?,?,?)",
-                      (int(tid), t["feature"], generation, role, float(usd), now()))
+            c.execute("INSERT INTO costs(task, feature, generation, role, usd, ts, unit) VALUES (?,?,?,?,?,?,?)",
+                      (int(tid), t["feature"], generation, role, float(usd), now(), unit))
 
     def costs(self, tid: int) -> list[dict]:
         return self._rows("SELECT * FROM costs WHERE task=? ORDER BY id", (int(tid),))
 
-    def task_cost(self, tid: int) -> float:
-        return self._rows("SELECT COALESCE(SUM(usd), 0) AS s FROM costs WHERE task=?", (int(tid),))[0]["s"]
+    def task_cost(self, tid: int, unit: str = "USD") -> float:
+        return self._rows("SELECT COALESCE(SUM(usd), 0) AS s FROM costs WHERE task=? AND unit=?",
+                          (int(tid), unit))[0]["s"]
 
-    def feature_cost(self, feature: str) -> float:
-        return self._rows("SELECT COALESCE(SUM(usd), 0) AS s FROM costs WHERE feature=?", (feature,))[0]["s"]
+    def feature_cost(self, feature: str, unit: str = "USD") -> float:
+        return self._rows("SELECT COALESCE(SUM(usd), 0) AS s FROM costs WHERE feature=? AND unit=?",
+                          (feature, unit))[0]["s"]
 
     def steer(self, tid: int, message: str, author: str = "human") -> None:
         """A message from the user for the task's worker, read at its next board_read."""

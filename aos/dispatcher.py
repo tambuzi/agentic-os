@@ -29,6 +29,9 @@ from .core import AOS
 from .errors import AosError
 from .workers import adapter
 from .workers.common import Launch, linked_project_path, parse_cost, prepare_review, prepare_run
+from .acp.permissions import decide
+from .acp.runner import AcpRun
+from .acp.tools import AdapterMissing, option_for
 from .sysmem import available_gb
 from .verify import head_commit, revert_to, verify_claim
 from .worktrees import branch_name, ensure_worktree, worktree_path
@@ -53,6 +56,9 @@ class Running:
     kind: str = "worker"              # or "reviewer"
     started_at: float = 0.0           # monotonic; recent starts reserve memory they haven't used yet
     log_path: Path | None = None      # the run's output, read for its cost when it exits
+    acp: AcpRun | None = None         # live ACP session (None = one-shot CLI process)
+    allowed: list | None = None       # neutral allow-list, for ACP permission requests
+    worktree: Path | None = None
     generation: int = 0               # the attempt token it was launched with
 
 
@@ -209,6 +215,7 @@ class Dispatcher:
                     # finish what this round started, including verifying its claims
                     while self.running or self.verifying or self.board.reviewable(self.feature):
                         time.sleep(self.tick_s)
+                        self._service_acp()
                         self._reap()
                         self._collect_verifications()
                         self._start_verifications()
@@ -233,6 +240,7 @@ class Dispatcher:
 
     # -- one tick ------------------------------------------------------------
     def tick(self) -> None:
+        self._service_acp()
         self._reap()
         self._collect_verifications()
         try:
@@ -297,7 +305,69 @@ class Dispatcher:
         self._last_stuck = stuck
 
     def _terminate(self, r: Running) -> None:
+        if r.acp:
+            r.acp.session.cancel()
+            r.acp.close()
         _kill_group(r.proc.pid, proc=r.proc)
+
+    # -- live ACP sessions -------------------------------------------------------
+    def _service_acp(self) -> None:
+        """Drain each live session's events on this thread; close a session once its turn
+        is over (the process then exits and is reaped like any other)."""
+        for tid, r in list(self.running.items()):
+            if not r.acp or r.acp.closed:
+                continue
+            try:
+                r.acp.session.drain(on_request=lambda rid, m, p, tid=tid, r=r: self._on_agent_request(tid, r, rid, m, p))
+                if r.acp.turn_finished():
+                    r.acp.close()
+            except TASK_ERRORS as e:
+                _warn(f"task #{tid}: {e}")
+
+    def _on_agent_request(self, tid: int, r: Running, req_id, method: str, params: dict) -> None:
+        conn = r.acp.conn
+        if method != "session/request_permission":
+            conn.respond(req_id, error={"code": -32601, "message": f"aos does not implement {method}"})
+            return
+        verdict = decide(params.get("toolCall") or {}, r.allowed or [], r.worktree or Path("."))
+        options = params.get("options") or []
+        if verdict.decision == "allow":
+            choice = option_for("allow", options)
+        else:  # reject, or ask (asking the user arrives with permission requests on the board)
+            choice = option_for("reject", options)
+            self.board.log_event(tid, "status", f"permission refused: {verdict.summary}")
+        conn.respond(req_id, {"outcome": {"outcome": "selected", "optionId": choice}} if choice
+                     else {"outcome": {"outcome": "cancelled"}})
+
+    def _spawn(self, tid: int, spec, settings: dict, mod, log_path: Path):
+        """Start a worker/reviewer: a live ACP session when the profile's transport is acp
+        (falling back to the CLI if ACP is unavailable here), else a one-shot process.
+        Returns (proc, launch, acp, log, transport)."""
+        tool = settings.get("adapter")
+        if settings.get("transport") == "acp" and tool in ("claude", "kiro"):
+            launch = mod.prepare(spec, settings) if tool == "kiro" else Launch([], spec.worktree, {})
+            acp = AcpRun(tool, settings, self.aos.home, log_path)
+            try:
+                from .workers import kiro as kiro_mod
+                acp.start(spec, kiro_agent=kiro_mod.agent_name(spec.task) if tool == "kiro" else None,
+                          resume_id=spec.session_id if spec.resume else None)
+                return acp.proc, launch, acp, None, "acp"
+            except AdapterMissing as e:
+                launch.cleanup()
+                self.board.log_event(tid, "status", f"ACP unavailable ({e.message}); using the CLI for this attempt")
+            except Exception:
+                launch.cleanup()
+                raise
+        launch = mod.prepare(spec, settings)
+        log = open(log_path, "ab")
+        try:
+            proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env=launch.env, stdin=subprocess.DEVNULL,
+                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        except Exception:
+            log.close()
+            launch.cleanup()
+            raise
+        return proc, launch, None, log, "cli"
 
     def _reap(self) -> None:
         for tid, r in list(self.running.items()):
@@ -334,8 +404,11 @@ class Dispatcher:
                 return
         # the leader exited; stop anything it left behind in its process group
         _kill_group(r.proc.pid, wait=1.0, proc=r.proc)
+        if r.acp:
+            r.acp.close()
         r.launch.cleanup()
-        r.log.close()
+        if r.log:
+            r.log.close()
         del self.running[tid]
         self._record_cost(tid, r)
         task = self.board.task(tid)
@@ -358,6 +431,11 @@ class Dispatcher:
         self.board.attempt_failed(tid, why)
 
     def _record_cost(self, tid: int, r: Running) -> None:
+        if r.acp:
+            if r.acp.session and r.acp.session.cost > 0:
+                self.board.add_cost(tid, r.acp.session.cost, role=r.kind, generation=r.generation,
+                                    unit=r.acp.session.cost_unit)
+            return
         if not r.log_path:
             return
         try:
@@ -372,17 +450,18 @@ class Dispatcher:
 
     def _over_budget(self, t: dict) -> str | None:
         cfg = self.aos.settings["board"]
-        task_budget, feature_budget = cfg.get("task_budget_usd"), cfg.get("feature_budget_usd")
-        if task_budget is not None:
-            spent = self.board.task_cost(t["id"])
-            if spent >= float(task_budget):
-                return (f"task budget reached: ${spent:.2f} of ${float(task_budget):.2f} spent; raise "
-                        "board.task_budget_usd in aos.yaml and unblock, or cancel the task")
-        if feature_budget is not None:
-            spent = self.board.feature_cost(t["feature"])
-            if spent >= float(feature_budget):
-                return (f"feature budget reached: ${spent:.2f} of ${float(feature_budget):.2f} spent on "
-                        f"{t['feature']}; raise board.feature_budget_usd in aos.yaml and unblock")
+        for unit, suffix, fmt in (("USD", "usd", "${:.2f}"), ("credit", "credits", "{:.2f} credits")):
+            task_budget, feature_budget = cfg.get(f"task_budget_{suffix}"), cfg.get(f"feature_budget_{suffix}")
+            if task_budget is not None:
+                spent = self.board.task_cost(t["id"], unit)
+                if spent >= float(task_budget):
+                    return (f"task budget reached: {fmt.format(spent)} of {fmt.format(float(task_budget))} spent; "
+                            f"raise board.task_budget_{suffix} in aos.yaml and unblock, or cancel the task")
+            if feature_budget is not None:
+                spent = self.board.feature_cost(t["feature"], unit)
+                if spent >= float(feature_budget):
+                    return (f"feature budget reached: {fmt.format(spent)} of {fmt.format(float(feature_budget))} "
+                            f"spent on {t['feature']}; raise board.feature_budget_{suffix} in aos.yaml and unblock")
         return None
 
     def _launch_ready(self) -> None:
@@ -467,12 +546,9 @@ class Dispatcher:
             aos = AOS(self.aos.repo, home=self.aos.home, slug=t["project"], data=self.aos.data)
             spec, settings = prepare_review(aos, self.board, task, wt, project_path, self.aos_bin)
             mod = adapter(settings["adapter"])
-            launch = mod.prepare(spec, settings)
             log_path = self.board.data / "logs" / f"{tid}-review-{task['review_attempts']}.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            log = open(log_path, "ab")
-            proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env=launch.env, stdin=subprocess.DEVNULL,
-                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            proc, launch, acp, log, transport = self._spawn(tid, spec, settings, mod, log_path)
         except Exception as e:  # a reviewer that cannot start counts as a review without verdict
             if launch:
                 launch.cleanup()
@@ -482,7 +558,7 @@ class Dispatcher:
         self.running[tid] = Running(proc, launch, time.monotonic() + 60 * timeout, timeout, log,
                                     getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"],
                                     kind="reviewer", generation=task["generation"], started_at=time.monotonic(),
-                                    log_path=log_path)
+                                    log_path=log_path, acp=acp, allowed=spec.allowed, worktree=spec.worktree)
         self._last_start = time.monotonic()
 
     def _launch(self, t: dict) -> None:
@@ -510,12 +586,9 @@ class Dispatcher:
             aos = AOS(self.aos.repo, home=self.aos.home, slug=t["project"], data=self.aos.data)
             spec, settings = prepare_run(aos, self.board, task, wt, project_path, self.aos_bin)
             mod = adapter(settings["adapter"])
-            launch = mod.prepare(spec, settings)
             log_path = self.board.data / "logs" / f"{tid}-{task['attempts']}.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            log = open(log_path, "ab")
-            proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env=launch.env, stdin=subprocess.DEVNULL,
-                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            proc, launch, acp, log, transport = self._spawn(tid, spec, settings, mod, log_path)
         except Exception as e:  # any launch failure is a failed attempt, never a crash of the loop
             if launch:
                 launch.cleanup()
@@ -525,6 +598,8 @@ class Dispatcher:
         self.running[tid] = Running(proc, launch, time.monotonic() + 60 * timeout, timeout, log,
                                     getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"],
                                     generation=task["generation"], started_at=time.monotonic(),
-                                    log_path=log_path)
+                                    log_path=log_path, acp=acp, allowed=spec.allowed, worktree=spec.worktree)
         self._last_start = time.monotonic()
-        self.board.set_process(tid, proc.pid, launch.session_id, proc_start=process_start(proc.pid))
+        self.board.set_transport(tid, transport)
+        session_id = acp.session.session_id if acp else launch.session_id
+        self.board.set_process(tid, proc.pid, session_id, proc_start=process_start(proc.pid))

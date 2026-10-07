@@ -27,7 +27,7 @@ from pathlib import Path
 TOOL = os.environ.get("FAKE_ACP_TOOL", "claude")
 LOG = os.environ.get("FAKE_ACP_LOG")
 lock = threading.Lock()
-state = {"task": None, "generation": None, "sessions": set(), "cancel": threading.Event(),
+state = {"task": None, "generation": None, "role": "worker", "sessions": set(), "cancel": threading.Event(),
          "pending_perm": {}, "next_id": 1000, "prompts": 0}
 sys.stderr.write("fake acp agent started\n")
 sys.stderr.flush()
@@ -51,6 +51,8 @@ def update(sid, upd):
 
 def mode():
     t = state["task"]
+    if state["role"] == "reviewer":
+        return "review_" + os.environ.get("FAKE_ACP_REVIEW", "pass")
     return os.environ.get(f"FAKE_ACP_MODE_{t}", os.environ.get("FAKE_ACP_MODE", "echo"))
 
 
@@ -159,6 +161,7 @@ def handle(msg):
             state["task"] = int(args[args.index("--task") + 1])
         if "--attempt" in args:
             state["generation"] = int(args[args.index("--attempt") + 1])
+        state["role"] = "reviewer" if "--review" in args else "worker"
         sid = params.get("sessionId") or f"sess-{state['task']}-{time.time_ns()}"
         state["sessions"].add(sid)
         note(method, {"sessionId": sid, "meta": params.get("_meta"), "cwd": params.get("cwd"),
