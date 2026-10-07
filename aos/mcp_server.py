@@ -116,7 +116,7 @@ WORKER_TOOLS = {"task_show", "board_read", "task_comment", "task_block", "task_p
                 "task_create", "task_complete"}
 PLANNER_TOOLS = {"feature_create", "feature_show", "task_create", "board_read", "board_start", "board_status",
                  "task_unblock", "task_retry", "task_cancel", "proposal_decide", "feature_workflow",
-                 "board_wait", "task_steer"}
+                 "board_wait", "task_steer", "permission_decide"}
 
 
 class BoardTools:
@@ -299,6 +299,7 @@ class BoardTools:
             "stuck": {str(k): v for k, v in self.board.stuck().items()
                       if any(t["id"] == k for t in tasks)},
             "pending_proposals": self.board.proposals(feature, "pending"),
+            "pending_permissions": self.board.permissions(feature=feature, status="pending"),
         }
 
     @_safe
@@ -351,6 +352,12 @@ class BoardTools:
     def _status(self, tid: int) -> dict:
         t = self.board.task(tid)
         return {"task": t["id"], "status": t["status"]}
+
+    @_safe
+    def permission_decide(self, permission: int, approve: bool, always: bool = False) -> dict:
+        p = self.board.decide_permission(permission, approve, always, author="human")
+        return {"permission": p["id"], "status": p["status"],
+                "message": "the waiting worker gets the answer at the dispatcher's next tick"}
 
     @_safe
     def task_steer(self, task: int, message: str) -> dict:
@@ -567,6 +574,11 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
         def board_wait(feature: str, cursor: dict | str | None = None, timeout_sec: float = 300) -> dict:
             """Wait (no tokens spent) until the feature needs the user (reason "attention"), needs board_start ("stalled"), is "finished", is "waiting_on_human" for an answer, or "timeout" passes. Always pass back the returned cursor."""
             return bt.board_wait(feature, cursor, timeout_sec)
+
+        @mcp.tool()
+        def permission_decide(permission: int, approve: bool, always: bool = False) -> dict:
+            """Answer a worker's pending permission request (from board_wait / board_status) with the user's decision. always=true also adds the rule to that project's allow-list."""
+            return bt.permission_decide(permission, approve, always)
 
         @mcp.tool()
         def task_steer(task: int, message: str) -> dict:

@@ -28,7 +28,8 @@ from .board import Board
 from .core import AOS
 from .errors import AosError
 from .workers import adapter
-from .workers.common import Launch, linked_project_path, parse_cost, prepare_review, prepare_run
+from .workers.common import (Launch, add_allowed_tool, linked_project_path, parse_cost, prepare_review,
+                             prepare_run)
 from .acp.permissions import decide
 from .acp.runner import AcpRun
 from .acp.tools import AdapterMissing, option_for
@@ -149,6 +150,8 @@ class Dispatcher:
         self.once = False
         self.aos_bin = shutil.which("aos") or "aos"
         self._last_stuck: dict | None = None
+        # permission id -> (task, Running, json-rpc request id, options, rule, asked at)
+        self.pending_perms: dict[int, tuple] = {}
 
     # -- lifecycle -----------------------------------------------------------
     @contextmanager
@@ -216,6 +219,7 @@ class Dispatcher:
                     while self.running or self.verifying or self.board.reviewable(self.feature):
                         time.sleep(self.tick_s)
                         self._service_acp()
+                        self._resolve_permissions()
                         self._reap()
                         self._collect_verifications()
                         self._start_verifications()
@@ -241,6 +245,7 @@ class Dispatcher:
     # -- one tick ------------------------------------------------------------
     def tick(self) -> None:
         self._service_acp()
+        self._resolve_permissions()
         self._reap()
         self._collect_verifications()
         try:
@@ -331,13 +336,49 @@ class Dispatcher:
             return
         verdict = decide(params.get("toolCall") or {}, r.allowed or [], r.worktree or Path("."))
         options = params.get("options") or []
-        if verdict.decision == "allow":
-            choice = option_for("allow", options)
-        else:  # reject, or ask (asking the user arrives with permission requests on the board)
-            choice = option_for("reject", options)
+        if verdict.decision == "ask":  # the user decides; the worker waits (not a stall)
+            pid = self.board.request_permission(tid, verdict.summary, json.dumps(params.get("toolCall") or {})[:4000],
+                                                verdict.rule, generation=r.generation, role=r.kind)
+            self.pending_perms[pid] = (tid, r, req_id, options, verdict.rule, time.monotonic())
+            return
+        if verdict.decision == "reject":
             self.board.log_event(tid, "status", f"permission refused: {verdict.summary}")
-        conn.respond(req_id, {"outcome": {"outcome": "selected", "optionId": choice}} if choice
-                     else {"outcome": {"outcome": "cancelled"}})
+        self._answer_permission(r, req_id, options, verdict.decision)
+
+    @staticmethod
+    def _answer_permission(r: Running, req_id, options: list, decision: str) -> None:
+        choice = option_for(decision, options)
+        try:
+            r.acp.conn.respond(req_id, {"outcome": {"outcome": "selected", "optionId": choice}} if choice
+                               else {"outcome": {"outcome": "cancelled"}})
+        except Exception as e:  # the agent may be gone already
+            _warn(f"permission answer not delivered: {e}")
+
+    def _resolve_permissions(self) -> None:
+        """Answer waiting permission requests the user decided; refuse ones nobody answered."""
+        timeout = 60 * float(self.aos.settings["board"].get("approval_timeout_min", 30))
+        for pid, (tid, r, req_id, options, rule, asked) in list(self.pending_perms.items()):
+            try:
+                p = self.board.permission(pid)
+                live = self.running.get(tid) is r and r.acp and not r.acp.closed
+                if not live:
+                    self.board.expire_permission(pid, "the worker is gone")
+                elif p["status"] == "approved":
+                    if p["always"] and rule:
+                        aos = AOS(self.aos.repo, home=self.aos.home, data=self.aos.data)
+                        add_allowed_tool(aos, r.project, rule)
+                        r.allowed = [*(r.allowed or []), rule]
+                    self._answer_permission(r, req_id, options, "always" if p["always"] else "allow")
+                elif p["status"] in ("denied", "expired"):
+                    self._answer_permission(r, req_id, options, "reject")
+                elif time.monotonic() - asked > timeout:
+                    self.board.expire_permission(pid, "no answer in time")
+                    self._answer_permission(r, req_id, options, "reject")
+                else:
+                    continue
+            except TASK_ERRORS as e:
+                _warn(f"permission #{pid}: {e}")
+            del self.pending_perms[pid]
 
     def _spawn(self, tid: int, spec, settings: dict, mod, log_path: Path):
         """Start a worker/reviewer: a live ACP session when the profile's transport is acp

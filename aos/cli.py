@@ -297,6 +297,9 @@ def cmd_task(a) -> int:
     elif a.action == "retry":
         board.retry(a.id, note=a.note, worker=a.worker, resume=a.resume)
         print(f"task #{a.id} queued again")
+    elif a.action in ("approve", "deny"):
+        p = board.decide_permission(a.id, a.action == "approve", getattr(a, "always", False))
+        print(f"permission #{p['id']} {p['status']}{' (always)' if p['always'] else ''}: {p['summary']}")
     elif a.action == "steer":
         board.steer(a.id, a.message)
         print(f"task #{a.id}: message queued; the worker reads it at its next board_read")
@@ -381,6 +384,9 @@ def cmd_board(a) -> int:
             tool = f"{t['worker']}/{t.get('transport') or '-'}"
             print(f"  #{t['id']:<4} {t['project']:<14} {t['status']:<10} {tool:<11} {t['attempts']}/{t['max_attempts']}"
                   f"{f'  ${cost:.2f}' if cost else ''}  {t['title']}{extra}")
+        for p in board.permissions(feature=f["slug"], status="pending"):
+            print(f"  permission #{p['id']} for #{p['task']}: {p['summary']}  "
+                  f"(aos task approve {p['id']} [--always] | aos task deny {p['id']})")
         for p in board.proposals(f["slug"], "pending"):
             print(f"  proposal #{p['id']} pending: {p['reason']}  (aos feature approve|reject {p['id']})")
     return 0
@@ -489,6 +495,10 @@ def _parser() -> argparse.ArgumentParser:
     t.add_argument("--note")
     t.add_argument("--worker")
     tsub.add_parser("cancel").add_argument("id", type=int)
+    t = tsub.add_parser("approve", help="allow a worker's pending permission request (see aos board)")
+    t.add_argument("id", type=int, help="permission request id")
+    t.add_argument("--always", action="store_true", help="also allow it from now on for that project")
+    tsub.add_parser("deny", help="refuse a worker's pending permission request").add_argument("id", type=int)
     t = tsub.add_parser("steer", help="send guidance to a task's worker while it works")
     t.add_argument("id", type=int)
     t.add_argument("message")

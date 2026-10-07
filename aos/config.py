@@ -24,6 +24,7 @@ DEFAULTS = {
     "board": {"parallel": 3, "max_parallel": 6, "worker_memory_gb": 1.0, "min_free_memory_gb": 2.0,
               "start_stagger_sec": 2.0, "task_budget_usd": None, "feature_budget_usd": None,
               "task_budget_credits": None, "feature_budget_credits": None,
+              "approval_timeout_min": 30, "stall_min": 10,
               "max_tasks_per_feature": 30, "default_worker": "claude",
               "verify": True, "verify_timeout_sec": 600, "review": True, "review_timeout_min": 15},
     "workers": {

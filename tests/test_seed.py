@@ -58,3 +58,8 @@ def test_master_skill_covers_the_whole_flow():
 
 def test_master_skill_can_steer_running_workers():
     assert "task_steer" in (ROOT / "skills/aos-feature/SKILL.md").read_text()
+
+
+def test_master_skill_relays_permission_requests():
+    text = (ROOT / "skills/aos-feature/SKILL.md").read_text()
+    assert "permission_decide" in text

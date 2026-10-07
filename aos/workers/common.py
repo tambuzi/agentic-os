@@ -95,6 +95,23 @@ def profile_settings(aos: AOS, profile: str, project: str) -> dict:
     return s
 
 
+def add_allowed_tool(aos: AOS, project: str, rule: str) -> None:
+    """`aos task approve --always`: remember a neutral rule in the project's local worker settings."""
+    import yaml
+    from ..store import locked
+    path = aos.data / "projects.yaml"
+    with locked(path):
+        data = yaml.safe_load(read_text(path)) or {}
+        proj = data.setdefault("projects", {}).setdefault(project, {}) or {}
+        data["projects"][project] = proj
+        worker = proj.setdefault("worker", {}) or {}
+        proj["worker"] = worker
+        tools = worker.setdefault("allowed_tools", [])
+        if rule not in tools:
+            tools.append(rule)
+        write_atomic(path, yaml.safe_dump(data, sort_keys=True, allow_unicode=True))
+
+
 def linked_project_path(project: str) -> Path:
     info = load_user_config()["projects"].get(project)
     if not info:

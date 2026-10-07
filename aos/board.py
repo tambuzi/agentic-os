@@ -45,6 +45,11 @@ CREATE TABLE IF NOT EXISTS costs(
   id INTEGER PRIMARY KEY AUTOINCREMENT, task INTEGER NOT NULL, feature TEXT NOT NULL,
   generation INTEGER, role TEXT NOT NULL, usd REAL NOT NULL, ts TEXT NOT NULL,
   unit TEXT NOT NULL DEFAULT 'USD');  -- usd holds the amount; unit is USD or credit
+CREATE TABLE IF NOT EXISTS permissions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, task INTEGER NOT NULL, feature TEXT NOT NULL, generation INTEGER,
+  role TEXT NOT NULL, summary TEXT NOT NULL, raw TEXT, rule TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',  -- pending | approved | denied | expired
+  always INTEGER NOT NULL DEFAULT 0, requested TEXT NOT NULL, decided TEXT);
 """
 
 
@@ -317,6 +322,55 @@ class Board:
     def feature_cost(self, feature: str, unit: str = "USD") -> float:
         return self._rows("SELECT COALESCE(SUM(usd), 0) AS s FROM costs WHERE feature=? AND unit=?",
                           (feature, unit))[0]["s"]
+
+    # -- permission requests from live (ACP) workers ------------------------------
+    def request_permission(self, tid: int, summary: str, raw: str = "", rule: str | None = None,
+                           generation: int | None = None, role: str = "worker") -> int:
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            cur = c.execute("INSERT INTO permissions(task, feature, generation, role, summary, raw, rule, requested) "
+                            "VALUES (?,?,?,?,?,?,?,?)", (int(tid), t["feature"], generation, role, summary, raw,
+                                                        rule, now()))
+            pid = cur.lastrowid
+            self._event(c, t["feature"], int(tid), "permission", f"{role}:{tid}",
+                        f"permission #{pid} requested: {summary}")
+        return pid
+
+    def permission(self, pid: int) -> dict:
+        rows = self._rows("SELECT * FROM permissions WHERE id=?", (int(pid),))
+        if not rows:
+            raise AosError(f"unknown permission request #{pid}", "aos board shows pending ones")
+        return rows[0]
+
+    def permissions(self, task: int | None = None, status: str | None = None, feature: str | None = None) -> list[dict]:
+        sql, params = "SELECT * FROM permissions WHERE 1=1", []
+        for col, val in (("task", task), ("status", status), ("feature", feature)):
+            if val is not None:
+                sql, params = sql + f" AND {col}=?", params + [val]
+        return self._rows(sql + " ORDER BY id", params)
+
+    def decide_permission(self, pid: int, approve: bool, always: bool = False, author: str = "human") -> dict:
+        with self._tx() as c:
+            p = c.execute("SELECT * FROM permissions WHERE id=?", (int(pid),)).fetchone()
+            if not p:
+                raise AosError(f"unknown permission request #{pid}")
+            if p["status"] != "pending":
+                raise AosError(f"permission request #{pid} is already {p['status']}")
+            status = "approved" if approve else "denied"
+            c.execute("UPDATE permissions SET status=?, always=?, decided=? WHERE id=?",
+                      (status, 1 if (approve and always) else 0, now(), int(pid)))
+            self._event(c, p["feature"], p["task"], "decision", author,
+                        f"permission #{pid} {status}{' (always)' if approve and always else ''}: {p['summary']}")
+        return self.permission(pid)
+
+    def expire_permission(self, pid: int, why: str) -> None:
+        with self._tx() as c:
+            p = c.execute("SELECT * FROM permissions WHERE id=?", (int(pid),)).fetchone()
+            if not p or p["status"] != "pending":
+                return
+            c.execute("UPDATE permissions SET status='expired', decided=? WHERE id=?", (now(), int(pid)))
+            self._event(c, p["feature"], p["task"], "decision", "dispatcher",
+                        f"permission #{pid} refused ({why}): {p['summary']}")
 
     def steer(self, tid: int, message: str, author: str = "human") -> None:
         """A message from the user for the task's worker, read at its next board_read."""
