@@ -52,6 +52,11 @@ def _contract_file(version: int, body: str) -> str:
     return f"{head}\n{body.strip()}\n" if body.strip() else f"{head}\n"
 
 
+def _same_failure(a: str, b: str) -> bool:
+    """Loop detection: the same failure reason, ignoring whitespace and case."""
+    return " ".join(a.split()).lower() == " ".join(b.split()).lower()
+
+
 def _contract_body(text: str) -> str:
     if text.startswith("<!-- aos contract"):
         return text.split("\n", 1)[1] if "\n" in text else ""
@@ -347,9 +352,11 @@ class Board:
         before redoing anything (resume hint). False for launch/startup failures."""
         with self._tx() as c:
             t = self._task_row(c, tid)
-            to = "failed" if t["attempts"] >= t["max_attempts"] else "ready"
+            repeated = bool(t["last_failure"]) and _same_failure(t["last_failure"], reason)
+            to = "failed" if repeated or t["attempts"] >= t["max_attempts"] else "ready"
+            why = " (same failure twice: retrying won't help)" if repeated else ""
             self._transition(c, tid, ("running",), to, "dispatcher",
-                             f"attempt {t['attempts']} failed: {reason} → {to}", pid=None,
+                             f"attempt {t['attempts']} failed: {reason}{why} → {to}", pid=None,
                              last_failure=reason, resume_hint=1 if ran else t["resume_hint"])
 
     def retry(self, tid: int, note: str | None = None, worker: str | None = None,
@@ -360,7 +367,7 @@ class Board:
                 raise AosError("--resume cannot switch worker tools", "retry without --resume to switch")
             self._transition(c, tid, ("failed", "blocked", "cancelled", "done", "ready"), "todo", author,
                              "retry requested" + (" (resume)" if resume else ""),
-                             attempts=0, note=note, resume=1 if resume else 0,
+                             attempts=0, last_failure=None, note=note, resume=1 if resume else 0,
                              worker=worker or t["worker"], pid=None)
         self.promote()
 
