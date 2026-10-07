@@ -8,7 +8,8 @@ What's planned next, in rough order.
 - the multi-project board and dispatcher with Claude Code and Kiro workers;
 - `code_query`;
 - the Kiro Workflows front-end;
-- the `aos-feature` master skill with `board_wait`.
+- the `aos-feature` master skill with `board_wait`;
+- board hardening (section 1) and ACP worker sessions (section 2).
 
 Several items borrow from [Kiro Crew](https://github.com/kirodotdev/kirocrew)'s worker design. The spec named in each item is the Crew document that describes the original pattern.
 
@@ -54,7 +55,7 @@ Small, contained changes to the current dispatcher and board.
   - Delivered as a `messages_for_you` field at the worker's next `board_read`.
   - Real mid-turn steering comes with ACP (section 2).
 
-## 2. ACP worker sessions (next, after a spike)
+## 2. ACP worker sessions ✅ (done 2026-10-07)
 
 Replace one-shot `claude -p` / `kiro-cli chat --no-interactive` runs with **live sessions over ACP** (Agent Client Protocol), which both Kiro and Claude (through an adapter) speak. *(Crew: `agent_sdk/backends.py`, `subagent.md`)*
 
@@ -66,12 +67,11 @@ Replace one-shot `claude -p` / `kiro-cli chat --no-interactive` runs with **live
 - Progress shown live: tool calls and output as they happen.
 
 **Plan:**
-- [ ] **Spike:**
-  - drive `kiro-cli` in ACP mode and the Claude ACP adapter from a small Python client;
-  - check prompts, streamed events, the approval round-trip, cancel and resume;
-  - check memory use per live session.
-- [ ] Design the long-lived session runner in the dispatcher (supervision, reconnect, crash recovery).
-- [ ] Migrate the `claude` and `kiro` adapters; keep the `command` adapter for tests and other CLIs.
+- [x] **Spike** (`spikes/acp/FINDINGS.md`): Kiro (`kiro-cli acp`) and the Claude adapter driven from a small Python client; prompts, events, approvals, cancel, resume and memory checked.
+- [x] Session runner in the dispatcher: permissions on the board, stall detection, one nudge, steering, resume, cost per unit; CLI fallback when ACP isn't available (spec `docs/superpowers/specs/2026-10-07-acp-workers-design.md`).
+- [x] `claude` and `kiro` run over ACP by default; the CLI transport and the `command` adapter stay.
+- [x] Global per-machine tool setting: `aos worker claude|kiro`.
+- [ ] Real Kiro run of the full scenario on a Kiro machine (the probe already verified the protocol).
 
 ## 3. Learning loop
 

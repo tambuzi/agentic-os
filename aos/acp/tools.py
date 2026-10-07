@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 from ..errors import AosError
 
 CLAUDE_ADAPTER_PACKAGE = "@agentclientprotocol/claude-agent-acp"
 CLAUDE_ADAPTER_VERSION = "0.87.0"
+
+run_command = subprocess.run  # replaced in tests
 
 FACTS = {
     "claude": {"context": "system_prompt", "steer": "injected", "cost_unit": "USD", "turn_end": None},
@@ -57,6 +60,35 @@ def launch(tool: str, settings: dict, home: str | Path) -> tuple[list[str], dict
             raise AdapterMissing("Kiro over ACP needs kiro-cli on PATH", "install kiro-cli and log in")
         return [kiro, "acp"], env
     raise AdapterMissing(f"no ACP support for worker profile {tool!r}")
+
+
+def install(tool: str, home: str | Path) -> str:
+    """Install what `tool` needs for ACP; returns what was done. Raises AosError."""
+    if tool == "kiro":
+        return "nothing to install: Kiro speaks ACP itself (`kiro-cli acp`)"
+    if tool != "claude":
+        raise AosError(f"no ACP support for worker profile {tool!r}", "use claude or kiro")
+    npm = shutil.which("npm")
+    if not npm:
+        raise AosError("npm not found", "install Node.js (it brings npm), then re-run `aos acp install claude`")
+    prefix = acp_home(home)
+    prefix.mkdir(parents=True, exist_ok=True)
+    pkg = f"{CLAUDE_ADAPTER_PACKAGE}@{CLAUDE_ADAPTER_VERSION}"
+    r = run_command([npm, "install", "--prefix", str(prefix), "--no-save", pkg], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise AosError(f"npm install {pkg} failed", (r.stderr or r.stdout or "").strip()[-500:])
+    return f"installed {pkg} in {prefix}"
+
+
+def status(tool: str, settings: dict, home: str | Path) -> tuple[bool, str]:
+    """How board work with `tool` will run on this machine, for `aos doctor`."""
+    if settings.get("transport", "acp") != "acp":
+        return True, f"{tool}: cli (transport set to {settings.get('transport')})"
+    try:
+        argv, _ = launch(tool, settings, home)
+    except AdapterMissing as e:
+        return False, f"{tool} over ACP unavailable: {e.message}; falls back to the CLI"
+    return True, f"{tool}: acp ({' '.join(argv)})"
 
 
 def steer_request(tool: str, session_id: str, text: str) -> tuple[str, dict]:

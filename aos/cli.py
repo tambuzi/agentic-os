@@ -171,6 +171,21 @@ def cmd_doctor(a) -> int:
     if kiro_cli:
         line(bool(os.environ.get("KIRO_API_KEY")), "KIRO_API_KEY set" if os.environ.get("KIRO_API_KEY")
              else "KIRO_API_KEY not set (headless Kiro needs it unless you are logged in)")
+    from .acp import tools as acp_tools
+    from .workers.common import profile_settings, resolve_tool
+    aos = AOS(repo)
+    tool, source = resolve_tool(aos, "")
+    line(True, f"board work uses {tool} ({source})")
+    line(shutil.which("node") is not None, "node (Claude ACP adapter)" if shutil.which("node")
+         else "node not found (needed only for Claude over ACP)")
+    for name in ("claude", "kiro"):
+        line(*acp_tools.status(name, profile_settings(aos, name, ""), aos_home()))
+    return 0
+
+
+def cmd_acp(a) -> int:
+    from .acp import tools as acp_tools
+    print(acp_tools.install(a.tool, aos_home()))
     return 0
 
 
@@ -521,6 +536,12 @@ def _parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_board)
     sub.add_parser("status", help="uncommitted agenticOS changes").set_defaults(fn=cmd_status)
     sub.add_parser("doctor", help="check installation").set_defaults(fn=cmd_doctor)
+
+    s = sub.add_parser("acp", help="live agent sessions (ACP) for board workers")
+    asub = s.add_subparsers(dest="action", required=True)
+    s = asub.add_parser("install", help="install what a tool needs for ACP (claude: the Node adapter)")
+    s.add_argument("tool", choices=["claude", "kiro"])
+    s.set_defaults(fn=cmd_acp)
     return p
 
 
