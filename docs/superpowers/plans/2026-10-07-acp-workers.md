@@ -19,7 +19,7 @@
 ## Global Constraints
 
 - The CLI transport keeps working unchanged. ACP must never be the reason a task fails: a missing adapter or Node falls back to CLI, with an event.
-- **Default transports:** Claude `acp`, Kiro `cli`, until `probe.py kiro` is verified.
+- **Default transports:** `acp` for both tools (Claude via the adapter, Kiro via `kiro-cli acp`), with `cli` as the fallback.
 - **The global tool lives in `~/.agenticos/config.yaml` key `worker`**, per user and never in the repo.
 - **Precedence:** task > feature > project > global > `board.default_worker`. `aos board run --worker` overrides for that run and updates the stored task.
 - **Permission handling:**
@@ -30,7 +30,14 @@
 - **End of turn without a verdict:** one nudge, then a failed attempt.
 - **Threading:** reader threads only enqueue; all board writes happen on the dispatcher thread.
 - **Session system context:** Claude `_meta.systemPrompt = {"append": context}`; Kiro: context as the first prompt block.
-- **Steering:** `_session/steering` first, then `_session/steer`; delivery is recorded as `steer_delivered`.
+- **Steering:**
+  - Claude: `_session/steering` with prompt blocks and priority `now` (injected).
+  - Kiro: `_session/steer` with `{message}` (queued until the running tool finishes).
+  - Kiro `--now` = cancel, wait for the turn to end, then a new prompt.
+  - Recorded as `steer_delivered` or `steer_queued`.
+- **Kiro hermetic session:** write the per-run Kiro agent file before launch and select it with `session/set_mode`; if it's missing, fall back to context as the first prompt block.
+- **Kiro cancel race:** wait for the trailing `_kiro.dev/metadata` (≤5 s) before the next prompt; retry once on an instant `refusal`.
+- **Costs carry a unit:** USD (Claude) or credits (Kiro). Budgets exist per unit.
 
 ## Review Focus
 
@@ -77,11 +84,12 @@
 - `tools.launch(tool, settings) -> (argv, env) | raises AdapterMissing`; `tools.STEER_METHODS`; `tools.option_for(tool, decision, options)`;
 - `AcpWorkerSession(conn, tool)` with `start(cwd, mcp_servers, context, resume_id=None) -> session_id`, `prompt(text) -> Pending`, `steer(text) -> bool`, `cancel()`, `cost_usd`, `close()`.
 - [ ] Tests (fake agent):
-  - Claude context is sent as `_meta.systemPrompt.append`, and Kiro's as the first block;
+  - Claude context is sent as `_meta.systemPrompt.append`; Kiro selects the per-run agent with `session/set_mode` (context via the agent's `file://` prompt), falling back to the first block;
   - MCP servers are converted to ACP form;
   - `session/load` when resuming;
-  - steer tries `_session/steering`, then `_session/steer`, and returns False when both are unknown;
-  - cost is taken from `usage_update.cost.amount`;
+  - steer: Claude `_session/steering` with prompt blocks; Kiro `_session/steer` with `{message}` → queued;
+  - cost from `usage_update.cost.amount` (USD) and from `_kiro.dev/metadata.meteringUsage` (credits);
+  - Kiro turn end waits for the trailing `_kiro.dev/metadata`, and retries once on an instant `refusal`;
   - `launch` raises `AdapterMissing` when the entry or Node is absent.
 - [ ] RED, implement, GREEN, commit.
 
@@ -105,7 +113,7 @@
 - Running gains `acp: AcpRun|None`.
 - [ ] Tests (fake agent as the `claude` tool via `acp_adapter` pointing at it):
   - a full worker turn → `review` → verified → reviewer via ACP → done;
-  - cost recorded;
+  - cost recorded with its unit (`costs.unit` column; budgets per unit);
   - adapter missing → falls back to CLI with an event;
   - cancel/terminate closes the session and kills the group;
   - Ctrl-C path;
@@ -129,7 +137,7 @@
   - silence beyond `stall_min` → cancel plus `attempt_failed("stalled…")`;
   - end turn without a verdict → one nudge, then `attempt_failed("ended without task_complete")`;
   - the same for reviewers → `review_unfinished`;
-  - a steer event → `_session/steering` sent plus `steer_delivered`;
+  - a steer event → Claude `_session/steering` plus `steer_delivered`; Kiro `_session/steer` plus `steer_queued`; `aos task steer --now` on Kiro → cancel, turn end, new prompt;
   - retry `--resume` → `session/load` with the stored id;
   - load failure → fresh session plus resume hint.
 - [ ] RED, implement, GREEN, commit.
@@ -148,4 +156,4 @@
 - [ ] Include one escalated permission, approved with `aos task approve`, and one mid-turn `aos task steer`.
 - [ ] Record the results in the ledger.
 - [ ] Clean up the test data.
-- [ ] Kiro: pending the user's `probe.py kiro`.
+- [ ] Kiro real run on the Kiro machine (the probe already verified ACP): the same scenario with `aos worker kiro`, including a queued steer and `--now`.

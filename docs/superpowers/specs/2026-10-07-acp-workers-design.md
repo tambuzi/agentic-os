@@ -1,7 +1,7 @@
 # ACP worker sessions, and choosing Claude or Kiro
 
 Date: 2026-10-07. Status: draft for review.
-Builds on the board specs and `spikes/acp/FINDINGS.md` (verified against `claude-agent-acp` 0.87.0). ROADMAP item 2.
+Builds on the board specs and `spikes/acp/FINDINGS.md` (verified against `claude-agent-acp` 0.87.0 and `kiro-cli acp` 2.23.0). ROADMAP item 2.
 
 ## 1. Intent
 
@@ -19,7 +19,7 @@ Board workers and reviewers run today as one-shot CLIs (`claude -p`, `kiro-cli c
 - A tool outside the worker's allow-list becomes a **permission request** visible in `aos board`, `board_wait` and the Kiro watch. The user's answer reaches the waiting worker.
 - `aos task steer` reaches a running ACP worker inside its turn.
 - A worker that goes silent for `board.stall_min` is cancelled and recorded as a failed attempt (`stalled`).
-- `cli` transport keeps working unchanged, and stays the default for Kiro until `spikes/acp/probe.py kiro` is verified.
+- `cli` transport keeps working unchanged as a fallback. ACP is the default for both tools: Claude through the adapter, Kiro natively (`kiro-cli acp`).
 - One global, per-user setting chooses the tool once (`aos worker kiro`). Feature, project and per-task overrides stay optional, and every view shows `tool/transport` per task.
 
 ### Out of scope
@@ -57,7 +57,7 @@ workers:
     transport: acp              # live sessions (needs Node + the adapter; aos falls back to cli if missing)
     acp_adapter: null           # path to claude-agent-acp's dist/index.js; null = ~/.agenticos/acp/... (aos acp install)
   kiro:
-    transport: cli              # switch to acp after the Kiro probe confirms it
+    transport: acp              # kiro-cli serves ACP itself (verified); no Node needed
 ```
 
 - `aos acp install claude` installs `@agentclientprotocol/claude-agent-acp` (pinned version) under `~/.agenticos/acp/`, outside iCloud.
@@ -122,6 +122,24 @@ workers:
 
 ### 5.6 Shutdown
 - Cancel, terminate, timeout and Ctrl-C send `session/cancel`, wait briefly, then kill the process group (existing `_kill_group`).
+
+### 5.7 Kiro specifics (from the Kiro probe)
+- **Hermetic tools and context:**
+  - `kiro-cli acp` also loads the user's global Kiro MCP servers. Its session "modes" are Kiro agents.
+  - So, as the CLI adapter already does, aos writes the per-run agent file `~/.kiro/agents/aos-<feature>-t<id>.json` (prompt = `file://<context>`, `includeMcpJson: false`, our MCP servers, our allow-list) **before** starting `kiro-cli acp`, then selects it with `session/set_mode`.
+  - If that mode isn't offered, the context goes in as the first prompt block, with an event saying the session isn't hermetic.
+- **Steering is queued, not injected:**
+  - Kiro uses `_session/steer` with `{"sessionId", "message": "<text>"}`, which replies `{"queued": true}`; it runs once the current tool call finishes.
+  - `aos task steer` uses it by default (event `steer_queued`).
+  - `aos task steer --now` on Kiro cancels the turn and sends the steer as a new prompt, after the turn has really ended (see below).
+- **Cancel race:**
+  - Kiro replies `cancelled` before its turn has finished. A prompt sent at once returns `refusal`, and the answers then arrive off by one turn.
+  - The turn has really ended once a trailing `_kiro.dev/metadata` notification arrives.
+  - So the runner waits for it, up to 5 s, before any new prompt, and retries once on an instant `refusal`.
+- **Cost in credits:**
+  - `_kiro.dev/metadata.meteringUsage: [{value, unit: "credit"}]` per turn. Claude reports USD in `usage_update.cost`.
+  - Costs are recorded with their **unit**. Budgets exist per unit: `task_budget_usd` / `feature_budget_usd` and `task_budget_credits` / `feature_budget_credits`.
+- **Memory:** ~100–300 MB per Kiro session vs ~400 MB per Claude session.
 
 ## 6. Data
 
