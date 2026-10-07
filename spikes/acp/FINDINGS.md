@@ -21,33 +21,38 @@ Launch: `node <pkg>/dist/index.js` with `CLAUDE_CODE_EXECUTABLE=$(which claude)`
 | Memory | ~400 MB peak for adapter + Claude Code + MCP servers during a turn |
 | Usage/cost | `usage_update` events stream during the turn (exact cost field still to map) |
 
-## Kiro: `kiro-cli acp`, to run on the Kiro machine
+## Kiro: `kiro-cli acp` 2.23.0 (macOS, run 2026-10-07)
 
-`kiro-cli` isn't installed on the dev Mac. From Kiro Crew's source: Kiro serves ACP itself via `kiro-cli acp`; approval option kinds are spelled differently (`allow_once`/`allow_always` vs Claude's); and Crew sends Kiro its `_session/steer` extension. Run:
+Launch: `kiro-cli acp`. Kiro serves ACP itself, so no adapter or Node is needed. Run: `python3 spikes/acp/probe.py kiro kiro-cli <git-workdir> "$(which aos)"`.
 
-```bash
-cd ~/agenticOS && git checkout spike/acp
-mkdir -p /tmp/acp-work && cd /tmp/acp-work && git init -q -b main && echo x > README.md && git add . && git commit -qm init
-cd ~/agenticOS && python3 spikes/acp/probe.py kiro kiro-cli /tmp/acp-work "$(which aos)"
-```
-
-Send back the JSON it prints, especially:
-- `3_prompt_with_permission`: permission requests and streamed update kinds;
-- `5_mid_turn_steer`: which method worked;
-- `6_resume`: whether `session/load` works.
+| Check | Result |
+|---|---|
+| `initialize` | protocol v1; `loadSession: true`, MCP over stdio and http (no sse); no steering advertised |
+| `session/new` with `mcpServers` | ✅ it got the `aos` server and called `memory_read` through it. It *also* loads the user's global Kiro MCP config (a broken `sonarqube` server showed up as `_kiro.dev/mcp/server_init_failure`) |
+| Session modes | Kiro agents rather than permission modes: `kiro_default`, `kiro_planner`, `kirocrew-worker`, etc. Models: `auto`, `claude-opus-5.5`, `claude-sonnet-5.5`, … |
+| **Streamed events** | ✅ `tool_call`, `tool_call_update` (one per output line of a shell command), `agent_message_chunk`, plus `_kiro.dev/*` extension notifications (`metadata`, `session/update` with `tool_call_chunk`, `commands/available`, `subagent/list_update`) |
+| **Permission requests to the client** | ✅ `session/request_permission` twice (write, MCP tool); `allow_once` let the work proceed (`hello.txt` = `hi`) |
+| **Cancel mid-turn** | ✅ `session/cancel` → `stopReason: cancelled` immediately. ⚠️ **Race:** the turn is still shutting down when that reply arrives. A `session/prompt` sent at once comes back `refusal` in 0 s, and its real answer arrives under the *next* prompt (replies are off by one turn). The turn has really ended once a trailing `_kiro.dev/metadata` with `meteringUsage` arrives. Waiting ~3 s also fixes it |
+| **Mid-turn steering** | ⚠️ **Queued, not injected.** `_session/steering` → method-not-found. `_session/steer` needs `{"sessionId", "message": "<string>"}` (sending Claude's `prompt` blocks gives a parse error) and replies `{"queued": true}`. The running 30 s command was **not** interrupted. After it finished, the same turn followed the steer (it skipped the summary and acknowledged STEERED): 34.7 s in total, vs 14.8 s on Claude |
+| **Resume** | ✅ `session/load` in a **new** `kiro-cli acp` process: it remembered creating `hello.txt` |
+| Memory | ~90–300 MB peak for the process group during a turn (two runs) |
+| Usage/cost | ✅ per turn in `_kiro.dev/metadata` → `meteringUsage: [{value, unit: "credit"}]` (~0.05 credits for a trivial turn); also `contextUsagePercentage` |
 
 ## Answer
 
-**Yes for Claude, with everything we wanted.** Live sessions give us four things one-shot CLIs can't:
+**Yes for both. Claude has everything we wanted; Kiro has everything except true mid-turn steering.** Live sessions give us four things one-shot CLIs can't:
 1. **Liveness:** stall detection from stream silence instead of a 45-min wall clock.
 2. **Approvals routed to aos:** a tool outside the allow-list can be asked about (to the planner or user) instead of the worker failing.
 3. **Real steering:** the user's message changes the current turn.
 4. **Clean cancel and resume:** without killing processes and losing the session.
 
 **Costs to design around:**
-- **~400 MB per live session.** This fits the memory-gated starts we already have; `worker_memory_gb` should become 0.5–1.0 when ACP is on.
+- **~400 MB per live Claude session, ~100–300 MB for Kiro.** This fits the memory-gated starts we already have; `worker_memory_gb` should become 0.5–1.0 when ACP is on.
 - **A Node dependency** for Claude (the adapter is an npm package).
-- **Steering method names differ per tool.** Use `_session/steering` (claude-agent-acp), and fall back to `_session/steer` (Crew's name for other harnesses).
+- **Steering differs per tool, in name, payload and meaning.** Claude: `_session/steering` with `prompt` blocks + `_meta.steering.priority`, injected mid-turn. Kiro: `_session/steer` with a `message` string, queued until the running tool finishes. A steer can't interrupt a long Kiro tool call, so `aos task steer` on Kiro may also need `session/cancel` + a new prompt.
+- **Kiro's cancel reply arrives before the turn has ended.** The runner must wait for the turn-end `_kiro.dev/metadata` (or retry once on an instant `refusal`) before sending the next prompt.
+- **Cost is reported differently.** Claude: `usage_update`. Kiro: `_kiro.dev/metadata.meteringUsage` in credits.
+- **Kiro sessions inherit the user's global MCP servers** on top of the ones we pass. Workers may need a dedicated Kiro agent/profile to stay hermetic.
 - **Approval option kinds differ per tool**, so they must be mapped.
 
 ## Recommendation
@@ -59,4 +64,4 @@ Build an ACP runner as a new worker *transport* behind the existing adapters, ke
 - delivers `aos task steer` as `_session/steering`;
 - cancels cleanly.
 
-Claude first (verified here); Kiro once `probe.py kiro` confirms its side.
+Claude first; Kiro is verified too, with the queued-steer and cancel-race caveats above handled in its transport.

@@ -21,7 +21,9 @@ RESULTS: dict[str, object] = {}
 
 class Client:
     def __init__(self):
-        env = {**os.environ, "CLAUDE_CODE_EXECUTABLE": shutil.which("claude")}
+        env = {**os.environ}
+        if TOOL == "claude":
+            env["CLAUDE_CODE_EXECUTABLE"] = shutil.which("claude")
         self.proc = subprocess.Popen(COMMAND, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=open(os.path.join(WORKDIR, "..", "adapter.stderr"), "ab"),
                                      text=True, bufsize=1, env=env, cwd=WORKDIR, start_new_session=True)
@@ -155,8 +157,8 @@ except Empty:
     resp = None
 RESULTS["4_cancel"] = {"stopReason": ((resp or {}).get("result") or {}).get("stopReason"),
                        "seconds_until_stopped": round(time.monotonic() - t0, 1)}
+time.sleep(3)  # kiro answers `cancelled` before teardown ends; a prompt sent at once gets `refusal`
 
-# 5. mid-turn steer (Crew's extension) -- expected: not implemented by this adapter
 # 5. mid-turn steering: start a 30 s command, steer after 6 s, see if the same turn changes course
 c.updates.clear()
 t0 = time.monotonic()
@@ -164,13 +166,14 @@ q = c.call_async("session/prompt", {"sessionId": sid, "prompt": [{"type": "text"
     "Run the shell command `for i in $(seq 1 30); do echo $i; sleep 1; done` and then summarise the output."}]})
 time.sleep(6)
 results = {}
-for method in ("_session/steering", "_session/steer"):  # claude-agent-acp / Crew's name for kiro & others
-    r = c.call(method, {"sessionId": sid, "prompt": [{"type": "text", "text":
-        "Change of plan from the user: stop that command now, do not run it again, and reply with exactly STEERED."}],
-        "_meta": {"steering": {"priority": "now"}}}, timeout=30)
-    results[method] = r.get("result", r.get("error"))
-    if "result" in r:
-        break
+STEER = "Change of plan from the user: stop that command now, do not run it again, and reply with exactly STEERED."
+if TOOL == "claude":   # claude-agent-acp: prompt blocks + priority; injected mid-turn
+    method, params = "_session/steering", {"sessionId": sid, "prompt": [{"type": "text", "text": STEER}],
+                                           "_meta": {"steering": {"priority": "now"}}}
+else:                  # kiro-cli: `message` string; queued until the running tool finishes
+    method, params = "_session/steer", {"sessionId": sid, "message": STEER}
+r = c.call(method, params, timeout=30)
+results[method] = r.get("result", r.get("error"))
 try:
     resp = q.get(timeout=120)
 except Empty:
