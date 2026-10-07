@@ -301,8 +301,8 @@ def cmd_task(a) -> int:
         p = board.decide_permission(a.id, a.action == "approve", getattr(a, "always", False))
         print(f"permission #{p['id']} {p['status']}{' (always)' if p['always'] else ''}: {p['summary']}")
     elif a.action == "steer":
-        board.steer(a.id, a.message)
-        print(f"task #{a.id}: message queued; the worker reads it at its next board_read")
+        board.steer(a.id, a.message, now=a.now)
+        print(f"task #{a.id}: message sent; a live worker gets it right away, others at their next board_read")
     elif a.action == "cancel":
         board.cancel(a.id)
         print(f"task #{a.id} cancelled")
@@ -502,6 +502,7 @@ def _parser() -> argparse.ArgumentParser:
     t = tsub.add_parser("steer", help="send guidance to a task's worker while it works")
     t.add_argument("id", type=int)
     t.add_argument("message")
+    t.add_argument("--now", action="store_true", help="Kiro: interrupt the current turn instead of queueing")
     t = tsub.add_parser("unblock")
     t.add_argument("id", type=int)
     t.add_argument("--note")

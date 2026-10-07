@@ -360,9 +360,9 @@ class BoardTools:
                 "message": "the waiting worker gets the answer at the dispatcher's next tick"}
 
     @_safe
-    def task_steer(self, task: int, message: str) -> dict:
-        self.board.steer(task, message, author="human")
-        return {"ok": True, "message": "the worker gets it at its next board_read"}
+    def task_steer(self, task: int, message: str, now: bool = False) -> dict:
+        self.board.steer(task, message, author="human", now=now)
+        return {"ok": True, "message": "delivered to the live session (or at the worker's next board_read)"}
 
     @_safe
     def task_unblock(self, task: int, note: str = "") -> dict:
@@ -581,9 +581,9 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
             return bt.permission_decide(permission, approve, always)
 
         @mcp.tool()
-        def task_steer(task: int, message: str) -> dict:
-            """Send the user's guidance to a task's worker while it works (it reads it at its next board_read)."""
-            return bt.task_steer(task, message)
+        def task_steer(task: int, message: str, now: bool = False) -> dict:
+            """Send the user's guidance to a task's worker while it works. Claude gets it inside its current turn; Kiro after its running tool (now=true interrupts the turn instead)."""
+            return bt.task_steer(task, message, now)
 
         @mcp.tool()
         def task_unblock(task: int, note: str = "") -> dict:

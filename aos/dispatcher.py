@@ -58,6 +58,7 @@ class Running:
     started_at: float = 0.0           # monotonic; recent starts reserve memory they haven't used yet
     log_path: Path | None = None      # the run's output, read for its cost when it exits
     acp: AcpRun | None = None         # live ACP session (None = one-shot CLI process)
+    steer_since: int = 0              # last steer event already delivered to the live session
     allowed: list | None = None       # neutral allow-list, for ACP permission requests
     worktree: Path | None = None
     generation: int = 0               # the attempt token it was launched with
@@ -324,10 +325,52 @@ class Dispatcher:
                 continue
             try:
                 r.acp.session.drain(on_request=lambda rid, m, p, tid=tid, r=r: self._on_agent_request(tid, r, rid, m, p))
-                if r.acp.turn_finished():
-                    r.acp.close()
+                self._deliver_steers(tid, r)
+                self._service_turn(tid, r)
             except TASK_ERRORS as e:
                 _warn(f"task #{tid}: {e}")
+
+    NUDGES = {
+        "worker": ("You ended your turn without calling task_complete or task_block. Finish the task now and call "
+                   "task_complete(summary), or call task_block(reason) if you cannot."),
+        "reviewer": ("You ended your turn without a verdict. Call review_pass(summary) or review_fail(findings) now."),
+    }
+
+    def _service_turn(self, tid: int, r: Running) -> None:
+        acp = r.acp
+        if acp.turn_finished():
+            if acp.reprompt is not None:  # Kiro steer --now: the cancelled turn is over, send the message
+                text, acp.reprompt = acp.reprompt, None
+                acp.session.prompt(text)
+                return
+            if self._still_owns(r, self.board.task(tid)) and not acp.nudged:
+                acp.nudged = True  # one reminder in the same session before the attempt counts as failed
+                acp.session.prompt(self.NUDGES[r.kind])
+                return
+            acp.close()
+            return
+        waiting = any(entry[1] is r for entry in self.pending_perms.values())
+        stall_s = 60 * float(self.aos.settings["board"].get("stall_min", 10))
+        if not waiting and acp.reprompt is None and time.monotonic() - acp.conn.last_activity > stall_s:
+            acp.stalled = True
+            acp.session.cancel()
+            acp.close()
+
+    def _deliver_steers(self, tid: int, r: Running) -> None:
+        for m in self.board.steer_messages(tid, since=r.steer_since):
+            r.steer_since = m["id"]
+            if m["now"] and r.acp.tool == "kiro":
+                r.acp.session.cancel()
+                r.acp.reprompt = f"Change of plan from the user: {m['message']}"
+                self.board.log_event(tid, "steer_delivered", f"turn cancelled; next prompt: {m['message']}")
+                continue
+            outcome = r.acp.session.steer(m["message"])
+            if outcome == "queued":
+                self.board.log_event(tid, "steer_queued", f"after the running tool: {m['message']}")
+            elif outcome:
+                self.board.log_event(tid, "steer_delivered", m["message"])
+            else:
+                self.board.log_event(tid, "status", "steer not delivered live; the worker reads it at its next board_read")
 
     def _on_agent_request(self, tid: int, r: Running, req_id, method: str, params: dict) -> None:
         conn = r.acp.conn
@@ -364,6 +407,7 @@ class Dispatcher:
                 if not live:
                     self.board.expire_permission(pid, "the worker is gone")
                 elif p["status"] == "approved":
+                    r.acp.conn.last_activity = time.monotonic()  # the wait for the user isn't silence
                     if p["always"] and rule:
                         aos = AOS(self.aos.repo, home=self.aos.home, data=self.aos.data)
                         add_allowed_tool(aos, r.project, rule)
@@ -379,6 +423,10 @@ class Dispatcher:
             except TASK_ERRORS as e:
                 _warn(f"permission #{pid}: {e}")
             del self.pending_perms[pid]
+
+    def _last_event_id(self, feature: str) -> int:
+        events = self.board.events(feature, limit=1)
+        return events[-1]["id"] if events else 0
 
     def _spawn(self, tid: int, spec, settings: dict, mod, log_path: Path):
         """Start a worker/reviewer: a live ACP session when the profile's transport is acp
@@ -455,13 +503,19 @@ class Dispatcher:
         task = self.board.task(tid)
         if not self._still_owns(r, task):
             return
+        stall_min = float(self.aos.settings["board"].get("stall_min", 10))
         if r.kind == "reviewer":
             why = (f"timed out after {r.timeout_min:g} min" if r.timed_out
+                   else f"stalled: no activity for {stall_min:g} min" if r.acp and r.acp.stalled
                    else f"exited with code {code}" if code else "exited without a verdict")
             self.board.review_unfinished(tid, why)
             return
         if r.timed_out:
             why = f"timed out after {r.timeout_min:g} min"
+        elif r.acp and r.acp.stalled:
+            why = f"stalled: no activity for {stall_min:g} min"
+        elif r.acp and r.acp.nudged:
+            why = "ended its turn without task_complete, even after a nudge"
         elif code in r.exit_reasons:  # the tool says it never got going (e.g. MCP startup)
             self.board.attempt_failed(tid, r.exit_reasons[code], ran=False)
             return
@@ -639,7 +693,8 @@ class Dispatcher:
         self.running[tid] = Running(proc, launch, time.monotonic() + 60 * timeout, timeout, log,
                                     getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"],
                                     generation=task["generation"], started_at=time.monotonic(),
-                                    log_path=log_path, acp=acp, allowed=spec.allowed, worktree=spec.worktree)
+                                    log_path=log_path, acp=acp, allowed=spec.allowed, worktree=spec.worktree,
+                                    steer_since=self._last_event_id(t["feature"]))
         self._last_start = time.monotonic()
         self.board.set_transport(tid, transport)
         session_id = acp.session.session_id if acp else launch.session_id

@@ -372,8 +372,9 @@ class Board:
             self._event(c, p["feature"], p["task"], "decision", "dispatcher",
                         f"permission #{pid} refused ({why}): {p['summary']}")
 
-    def steer(self, tid: int, message: str, author: str = "human") -> None:
-        """A message from the user for the task's worker, read at its next board_read."""
+    def steer(self, tid: int, message: str, author: str = "human", now: bool = False) -> None:
+        """A message from the user for the task's worker: delivered live to an ACP session,
+        and readable at its next board_read. `now`: interrupt the current turn for it."""
         if not (message or "").strip():
             raise AosError("steer message is empty")
         with self._tx() as c:
@@ -381,12 +382,13 @@ class Board:
             if t["status"] in ("done", "cancelled", "failed"):
                 raise AosError(f"task #{tid} is {t['status']}; nothing is working on it to steer",
                                "use aos task retry --note instead")
-            self._event(c, t["feature"], int(tid), "steer", author, message.strip())
+            self._event(c, t["feature"], int(tid), "steer_now" if now else "steer", author, message.strip())
 
     def steer_messages(self, tid: int, since: int = 0) -> list[dict]:
         t = self.task(tid)
-        return [{"id": e["id"], "ts": e["ts"], "message": e["body"]}
-                for e in self.events(t["feature"], since) if e["task"] == t["id"] and e["kind"] == "steer"]
+        return [{"id": e["id"], "ts": e["ts"], "message": e["body"], "now": e["kind"] == "steer_now"}
+                for e in self.events(t["feature"], since)
+                if e["task"] == t["id"] and e["kind"] in ("steer", "steer_now")]
 
     def set_worker(self, tid: int, worker: str, author: str = "dispatcher", why: str = "") -> None:
         with self._tx() as c:

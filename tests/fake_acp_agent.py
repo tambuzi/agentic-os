@@ -112,6 +112,12 @@ def run_prompt(rid, sid, text):
     elif m == "silent":
         state["cancel"].wait(timeout=600)
         finish_turn(rid, sid, "cancelled")
+    elif m == "no_verdict_once":  # forgets task_complete on the first turn, finishes after a nudge
+        if state["prompts"] == 1:
+            update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "done?"}})
+        else:
+            complete_task("finished after the nudge")
+        finish_turn(rid, sid)
     elif m == "no_verdict":
         update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "I think I'm done"}})
         finish_turn(rid, sid)

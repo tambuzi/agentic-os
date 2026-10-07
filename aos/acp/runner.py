@@ -27,6 +27,8 @@ class AcpRun:
         self.turn_done_at: float | None = None
         self.closed = False
         self.nudged = False
+        self.stalled = False
+        self.reprompt: str | None = None  # Kiro steer --now: the next prompt once the turn has ended
 
     @property
     def proc(self):
