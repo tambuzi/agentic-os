@@ -175,8 +175,15 @@ class BoardTools:
 
     @_safe
     def task_complete(self, summary: str) -> dict:
-        self.board.complete(self._own()["id"], summary, self.author, generation=self.attempt)
-        return {"ok": True}
+        verify = bool(self.aos.settings["board"].get("verify", True))
+        tid = self._own()["id"]
+        self.board.complete(tid, summary, self.author, generation=self.attempt,
+                            to="review" if verify else "done")
+        if verify:
+            return {"ok": True, "status": "review",
+                    "message": "claim recorded; the board verifies your commits (and tests) before it counts "
+                               "as done. Stop working on this task now."}
+        return {"ok": True, "status": "done"}
 
     # -- both modes ----------------------------------------------------------
     @_safe
@@ -297,9 +304,10 @@ class BoardTools:
                         "tasks": [{"task": t["id"], "project": t["project"], "title": t["title"],
                                    "status": t["status"], "result": t["result"]} for t in tasks]}
             running = dispatcher_status(self.board.data)["running"]
-            if not running and self.board.dispatchable(feature):
+            if not running and (self.board.dispatchable(feature) or self.board.reviewable(feature)):
                 return {"reason": "stalled", "counts": counts, "cursor": new_cursor,
-                        "message": "ready tasks but no dispatcher: call board_start, then board_wait again"}
+                        "message": "tasks are ready or waiting to be verified but no dispatcher is running: "
+                                   "call board_start, then board_wait again"}
             if not running and not any(t["status"] in ("running", "ready") for t in tasks):
                 return {"reason": "waiting_on_human", "counts": counts, "cursor": new_cursor,
                         "pending": [info for _, info in attention.values()],

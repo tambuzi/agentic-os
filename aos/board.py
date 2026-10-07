@@ -17,7 +17,7 @@ from .config import check_slug
 from .errors import AosError
 from .store import read_text, write_atomic
 
-STATUSES = ("todo", "ready", "running", "blocked", "done", "failed", "cancelled")
+STATUSES = ("todo", "ready", "running", "review", "blocked", "done", "failed", "cancelled")
 FEATURE_STATUSES = ("open", "done", "cancelled")
 CONTRACT_HEADER = "<!-- aos contract v{} -->"
 
@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS tasks(
   worker TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL,
   contract_seen INTEGER, result TEXT, session_id TEXT, pid INTEGER, proc_start TEXT, note TEXT,
   generation INTEGER NOT NULL DEFAULT 0, resume_hint INTEGER NOT NULL DEFAULT 0, last_failure TEXT,
+  base_commit TEXT, feedback TEXT,
   resume INTEGER NOT NULL DEFAULT 0, started TEXT, updated TEXT NOT NULL, created_by TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS deps(task INTEGER NOT NULL, depends_on INTEGER NOT NULL,
   PRIMARY KEY(task, depends_on));
@@ -82,7 +83,9 @@ class Board:
             c.execute("ALTER TABLE tasks ADD COLUMN proc_start TEXT")
         for name, decl in (("generation", "INTEGER NOT NULL DEFAULT 0"),      # attempt tokens
                            ("resume_hint", "INTEGER NOT NULL DEFAULT 0"),     # resume hint
-                           ("last_failure", "TEXT")):                         # same-failure detection
+                           ("last_failure", "TEXT"),                          # same-failure detection
+                           ("base_commit", "TEXT"),                           # verify: commits since claim
+                           ("feedback", "TEXT")):                             # why a claim was rejected
             if name not in cols:  # boards created before the column existed
                 c.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
         return c
@@ -295,13 +298,16 @@ class Board:
     def _version(self, c, feature: str) -> int:
         return c.execute("SELECT contract_version FROM features WHERE slug=?", (feature,)).fetchone()[0]
 
-    def claim(self, tid: int) -> dict:
+    def claim(self, tid: int, base_commit: str | None = None) -> dict:
+        """ready -> running. `base_commit`: the worktree HEAD the attempt starts from, so its
+        own commits can be verified (and later reverted) independently of earlier work."""
         with self._tx() as c:
             t = self._task_row(c, tid)
             self._transition(c, tid, ("ready",), "running", "dispatcher",
                              f"attempt {t['attempts'] + 1} started",
                              attempts=t["attempts"] + 1, generation=t["generation"] + 1,
-                             contract_seen=self._version(c, t["feature"]), started=now(), pid=None)
+                             contract_seen=self._version(c, t["feature"]), started=now(), pid=None,
+                             base_commit=base_commit)
         return self.task(tid)
 
     def set_process(self, tid: int, pid: int | None, session_id: str | None,
@@ -316,7 +322,11 @@ class Board:
             t = self._task_row(c, tid)
             c.execute("UPDATE tasks SET contract_seen=? WHERE id=?", (self._version(c, t["feature"]), int(tid)))
 
-    def complete(self, tid: int, summary: str, author: str, generation: int | None = None) -> None:
+    def complete(self, tid: int, summary: str, author: str, generation: int | None = None,
+                 to: str = "done") -> None:
+        """running -> done, or -> review when the dispatcher must verify the claim first."""
+        if to not in ("done", "review"):
+            raise AosError(f"cannot complete into {to!r}")
         if not (summary or "").strip():
             raise AosError("summary is empty", "say what changed, the commits, and how it was tested")
         with self._tx() as c:
@@ -327,11 +337,44 @@ class Board:
                 raise AosError(f"contract changed (v{t['contract_seen']}→v{v}) since you last read it",
                                "call board_read or task_show, re-check your work against the new "
                                "contract, then complete")
-            self._transition(c, tid, ("running",), "done", author,
-                             f"done: {summary.strip().splitlines()[0][:120]}",
-                             result=summary.strip(), pid=None, note=None, resume=0,
-                             resume_hint=0, last_failure=None)
+            first = summary.strip().splitlines()[0][:120]
+            if to == "review":
+                self._transition(c, tid, ("running",), "review", author, f"claimed done, verifying: {first}",
+                                 result=summary.strip(), pid=None)
+            else:
+                self._transition(c, tid, ("running",), "done", author, f"done: {first}",
+                                 result=summary.strip(), pid=None, note=None, resume=0,
+                                 resume_hint=0, last_failure=None, feedback=None)
             self._event(c, t["feature"], int(tid), "result", author, summary.strip())
+
+    def accept(self, tid: int, detail: str, author: str = "dispatcher") -> None:
+        """review -> done: the claim was verified (and reviewed)."""
+        with self._tx() as c:
+            t = self._transition(c, tid, ("review",), "done", author, f"done: {detail}",
+                                 note=None, resume=0, resume_hint=0, last_failure=None, feedback=None)
+            self._event(c, t["feature"], int(tid), "verified", author, detail)
+
+    def reject_review(self, tid: int, findings: str, author: str = "dispatcher") -> None:
+        """review -> ready (or failed): the claim did not hold up. The findings go to the
+        next attempt; the same findings twice end the task (loop detection)."""
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            repeated = bool(t["last_failure"]) and _same_failure(t["last_failure"], findings)
+            to = "failed" if repeated or t["attempts"] >= t["max_attempts"] else "ready"
+            why = " (same failure twice: retrying won't help)" if repeated else ""
+            self._transition(c, tid, ("review",), to, author,
+                             f"attempt {t['attempts']} not accepted{why} → {to}",
+                             feedback=findings, last_failure=findings, resume_hint=0)
+            self._event(c, t["feature"], int(tid), "rejected", author, findings)
+
+    def reviewable(self, feature: str | None = None) -> list[dict]:
+        """tasks waiting for verification/review, in open features."""
+        sql = ("SELECT t.* FROM tasks t JOIN features f ON f.slug=t.feature "
+               "WHERE t.status='review' AND f.status='open'")
+        params: list = []
+        if feature:
+            sql, params = sql + " AND t.feature=?", [feature]
+        return self._rows(sql + " ORDER BY t.id", params)
 
     def block(self, tid: int, reason: str, author: str, generation: int | None = None) -> None:
         if not (reason or "").strip():

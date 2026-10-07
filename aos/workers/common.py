@@ -132,6 +132,9 @@ def prepare_run(aos: AOS, board: Board, task: dict, worktree: Path, project_path
         prompt = f"{base}\n\nNote from the human: {note}"
     else:
         prompt = base
+    if task.get("feedback"):
+        prompt += ("\n\nYour previous attempt was not accepted:\n" + task["feedback"].strip() +
+                   "\nFix this before calling task_complete again.")
     if task.get("resume_hint"):
         prompt += ("\n\nA previous attempt of this task may have partly run before it was interrupted"
                    f" ({task.get('last_failure') or 'unknown reason'}). Before redoing anything, inspect the"

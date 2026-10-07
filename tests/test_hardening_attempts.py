@@ -47,7 +47,7 @@ def test_stale_worker_is_refused(board, configured):
         assert "error" in r and "attempt 1" in r["error"] and "stale" in r["error"], r
     assert b.task(t)["status"] == "running"
     assert new.task_complete("done by the current attempt")["ok"]
-    assert b.task(t)["status"] == "done"
+    assert b.task(t)["status"] == "review"  # a worker's complete is a claim, verified next
 
 
 def test_board_level_check_is_transactional(board):

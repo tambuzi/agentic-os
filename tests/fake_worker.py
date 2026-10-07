@@ -30,6 +30,15 @@ if mode == "block_then_sleep":
     board.block(tid, "fake blocker", author=f"task:{tid}")
     time.sleep(float(os.environ.get("FAKE_SLEEP", "30")))
     sys.exit(0)
+if mode in ("commit_complete", "nocommit_complete"):
+    import subprocess
+    if mode == "commit_complete":
+        (Path.cwd() / f"t{tid}-{os.getpid()}.txt").write_text("work\n")
+        subprocess.run(["git", "add", "."], check=True)
+        subprocess.run(["git", "commit", "-qm", f"task {tid}"], check=True)
+    board.mark_seen(tid)
+    board.complete(tid, f"claimed done by fake worker ({mode})", author=f"task:{tid}", to="review")
+    sys.exit(0)
 if mode == "write":
     (Path.cwd() / f"t{tid}.txt").write_text("work\n")
 board.mark_seen(tid)

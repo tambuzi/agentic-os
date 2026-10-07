@@ -18,6 +18,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,7 @@ from .core import AOS
 from .errors import AosError
 from .workers import adapter
 from .workers.common import Launch, linked_project_path, prepare_run
+from .verify import head_commit, verify_claim
 from .worktrees import branch_name, ensure_worktree, worktree_path
 
 # Board-level failures for a single task (status moved under us, sqlite busy, ...)
@@ -121,6 +123,8 @@ class Dispatcher:
         self.tick_s = tick
         self.grace_s = 30.0
         self.running: dict[int, Running] = {}
+        self.verifying: dict[int, Future] = {}
+        self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="aos-verify")
         self.stopping = False
         self.once = False
         self.aos_bin = shutil.which("aos") or "aos"
@@ -176,7 +180,8 @@ class Dispatcher:
     def idle(self) -> bool:
         """Nothing running and nothing that can start: the rest needs a human (blocked,
         stuck, failed) or the feature is finished."""
-        return not self.running and not self.board.dispatchable(self.feature)
+        return (not self.running and not self.verifying and not self.board.dispatchable(self.feature)
+                and not self.board.reviewable(self.feature))
 
     def run(self, once: bool = False, until_done: bool = False) -> None:
         self.once = once
@@ -187,9 +192,12 @@ class Dispatcher:
                 self.recover()
                 self.tick()
                 if once:
-                    while self.running:
+                    # finish what this round started, including verifying its claims
+                    while self.running or self.verifying or self.board.reviewable(self.feature):
                         time.sleep(self.tick_s)
                         self._reap()
+                        self._collect_verifications()
+                        self._start_verifications()
                     self.board.promote()
                     return
                 while not (self.stopping and not self.running):
@@ -210,13 +218,49 @@ class Dispatcher:
     # -- one tick ------------------------------------------------------------
     def tick(self) -> None:
         self._reap()
+        self._collect_verifications()
         try:
             self.board.promote()
         except TASK_ERRORS as e:
             _warn(f"promote: {e}")
         if not self.stopping:
             self._launch_ready()
+        self._start_verifications()
         self._report_stuck()
+
+    # -- verification of claims ------------------------------------------------
+    def _start_verifications(self) -> None:
+        """Verify `review` tasks once their worker process is gone (worktree quiescent)."""
+        try:
+            pending = self.board.reviewable(self.feature)
+        except TASK_ERRORS as e:
+            _warn(f"board read: {e}")
+            return
+        live = {(r.feature, r.project) for r in self.running.values()}
+        timeout = float(self.aos.settings["board"].get("verify_timeout_sec", 600))
+        for t in pending:
+            if t["id"] in self.running or t["id"] in self.verifying or (t["feature"], t["project"]) in live:
+                continue
+            worker = ((self.aos.projects().get(t["project"]) or {}).get("worker")) or {}
+            wt = worktree_path(self.aos.home, t["feature"], t["project"])
+            self.verifying[t["id"]] = self._pool.submit(verify_claim, t, wt, worker.get("verify_command"), timeout)
+
+    def _collect_verifications(self) -> None:
+        for tid, fut in list(self.verifying.items()):
+            if not fut.done():
+                continue
+            del self.verifying[tid]
+            try:
+                ok, detail = fut.result()
+            except Exception as e:  # a broken check is a rejected claim, never a crashed loop
+                ok, detail = False, f"verification error: {type(e).__name__}: {e}"
+            try:
+                if ok:
+                    self.board.accept(tid, detail)
+                else:
+                    self.board.reject_review(tid, detail)
+            except TASK_ERRORS as e:
+                _warn(f"task #{tid}: {e}")
 
     def _report_stuck(self) -> None:
         if self.running:
@@ -285,6 +329,12 @@ class Dispatcher:
             _warn(f"board read: {e}")
             return
         busy |= {(r.feature, r.project) for r in self.running.values()}
+        # a worktree whose last task awaits verification is not free yet
+        try:
+            busy |= {(t["feature"], t["project"]) for t in self.board.reviewable()}
+        except TASK_ERRORS as e:
+            _warn(f"board read: {e}")
+            return
         for t in ready:
             if len(self.running) >= self.parallel:
                 break
@@ -306,7 +356,7 @@ class Dispatcher:
         except AosError as e:
             self.board.block(tid, e.message + (f" ({e.hint})" if e.hint else ""), author="dispatcher")
             return
-        task = self.board.claim(tid)  # raises if the task moved (e.g. cancelled) meanwhile
+        task = self.board.claim(tid, base_commit=head_commit(wt))  # raises if the task moved meanwhile
         launch = None
         try:
             aos = AOS(self.aos.repo, home=self.aos.home, slug=t["project"], data=self.aos.data)
