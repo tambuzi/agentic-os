@@ -132,6 +132,11 @@ def prepare_run(aos: AOS, board: Board, task: dict, worktree: Path, project_path
         prompt = f"{base}\n\nNote from the human: {note}"
     else:
         prompt = base
+    if task.get("resume_hint"):
+        prompt += ("\n\nA previous attempt of this task may have partly run before it was interrupted"
+                   f" ({task.get('last_failure') or 'unknown reason'}). Before redoing anything, inspect the"
+                   " current state (git status, git log, files, board_read) and continue from there;"
+                   " do not repeat side effects that already happened.")
     spec = RunSpec(task=task, project_path=Path(project_path), worktree=Path(worktree), run_dir=run_dir,
                    context_file=context_file, prompt=prompt,
                    mcp_servers=mcp_servers(project_path, task["id"], aos_bin, task.get("generation")),

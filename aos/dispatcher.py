@@ -268,8 +268,9 @@ class Dispatcher:
             return
         if r.timed_out:
             why = f"timed out after {r.timeout_min:g} min"
-        elif code in r.exit_reasons:
-            why = r.exit_reasons[code]
+        elif code in r.exit_reasons:  # the tool says it never got going (e.g. MCP startup)
+            self.board.attempt_failed(tid, r.exit_reasons[code], ran=False)
+            return
         elif code == 0:
             why = "exited without task_complete"
         else:
@@ -320,7 +321,7 @@ class Dispatcher:
         except Exception as e:  # any launch failure is a failed attempt, never a crash of the loop
             if launch:
                 launch.cleanup()
-            self.board.attempt_failed(tid, f"launch failed: {e}")
+            self.board.attempt_failed(tid, f"launch failed: {e}", ran=False)
             return
         timeout = float(settings["timeout_min"])
         self.running[tid] = Running(proc, launch, time.monotonic() + 60 * timeout, timeout, log,

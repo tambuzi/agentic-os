@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS tasks(
   title TEXT NOT NULL, spec TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'todo',
   worker TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL,
   contract_seen INTEGER, result TEXT, session_id TEXT, pid INTEGER, proc_start TEXT, note TEXT,
-  generation INTEGER NOT NULL DEFAULT 0,
+  generation INTEGER NOT NULL DEFAULT 0, resume_hint INTEGER NOT NULL DEFAULT 0, last_failure TEXT,
   resume INTEGER NOT NULL DEFAULT 0, started TEXT, updated TEXT NOT NULL, created_by TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS deps(task INTEGER NOT NULL, depends_on INTEGER NOT NULL,
   PRIMARY KEY(task, depends_on));
@@ -75,8 +75,11 @@ class Board:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(tasks)")}
         if "proc_start" not in cols:  # boards created before proc_start existed
             c.execute("ALTER TABLE tasks ADD COLUMN proc_start TEXT")
-        if "generation" not in cols:  # boards created before attempt tokens existed
-            c.execute("ALTER TABLE tasks ADD COLUMN generation INTEGER NOT NULL DEFAULT 0")
+        for name, decl in (("generation", "INTEGER NOT NULL DEFAULT 0"),      # attempt tokens
+                           ("resume_hint", "INTEGER NOT NULL DEFAULT 0"),     # resume hint
+                           ("last_failure", "TEXT")):                         # same-failure detection
+            if name not in cols:  # boards created before the column existed
+                c.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
         return c
 
     @contextmanager
@@ -321,7 +324,8 @@ class Board:
                                "contract, then complete")
             self._transition(c, tid, ("running",), "done", author,
                              f"done: {summary.strip().splitlines()[0][:120]}",
-                             result=summary.strip(), pid=None, note=None, resume=0)
+                             result=summary.strip(), pid=None, note=None, resume=0,
+                             resume_hint=0, last_failure=None)
             self._event(c, t["feature"], int(tid), "result", author, summary.strip())
 
     def block(self, tid: int, reason: str, author: str, generation: int | None = None) -> None:
@@ -338,12 +342,15 @@ class Board:
             self._transition(c, tid, ("blocked",), "todo", author, "unblocked", note=note or None)
         self.promote()
 
-    def attempt_failed(self, tid: int, reason: str) -> None:
+    def attempt_failed(self, tid: int, reason: str, ran: bool = True) -> None:
+        """`ran`: the worker got as far as running, so the next attempt must inspect state
+        before redoing anything (resume hint). False for launch/startup failures."""
         with self._tx() as c:
             t = self._task_row(c, tid)
             to = "failed" if t["attempts"] >= t["max_attempts"] else "ready"
             self._transition(c, tid, ("running",), to, "dispatcher",
-                             f"attempt {t['attempts']} failed: {reason} → {to}", pid=None)
+                             f"attempt {t['attempts']} failed: {reason} → {to}", pid=None,
+                             last_failure=reason, resume_hint=1 if ran else t["resume_hint"])
 
     def retry(self, tid: int, note: str | None = None, worker: str | None = None,
               resume: bool = False, author: str = "human") -> None:
