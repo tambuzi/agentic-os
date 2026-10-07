@@ -12,7 +12,7 @@ Board workers and reviewers run today as one-shot CLIs (`claude -p`, `kiro-cli c
 - **steers mid-turn:** `aos task steer` changes the current turn;
 - **cancels cleanly and resumes** a session after a restart or a retry.
 
-**Also asked for: a clear flag for Claude vs Kiro.** The user wants to know, and choose, which tool runs a feature's work without editing YAML.
+**Also asked for: a global flag for Claude vs Kiro.** Set once per machine and used everywhere, without repeating it per feature.
 
 ### Success criteria
 - With `transport: acp`, a Claude worker runs a full board task (work → verify → review → done) through ACP sessions.
@@ -20,7 +20,7 @@ Board workers and reviewers run today as one-shot CLIs (`claude -p`, `kiro-cli c
 - `aos task steer` reaches a running ACP worker inside its turn.
 - A worker that goes silent for `board.stall_min` is cancelled and recorded as a failed attempt (`stalled`).
 - `cli` transport keeps working unchanged, and stays the default for Kiro until `spikes/acp/probe.py kiro` is verified.
-- One flag chooses the tool for a feature or a whole run, and every view shows `tool/transport` per task.
+- One global, per-user setting chooses the tool once (`aos worker kiro`). Feature, project and per-task overrides stay optional, and every view shows `tool/transport` per task.
 
 ### Out of scope
 - ACP for the planner session itself: `aos-feature` runs inside the user's Claude Code or Kiro chat.
@@ -29,17 +29,23 @@ Board workers and reviewers run today as one-shot CLIs (`claude -p`, `kiro-cli c
 
 ## 2. Choosing the tool (the flag)
 
-**Precedence for a task's tool** (first match wins):
-1. `aos task add … --worker claude|kiro` (exists);
-2. **feature default (new):** `aos feature new <slug> --worker claude|kiro`, and `feature_create(…, worker=)` for the planner;
-3. project default: `projects.<slug>.worker.profile` (exists);
-4. `board.default_worker` in `aos.yaml` (exists).
+**A global setting first.** Someone who uses Kiro (or Claude) always uses it, so the tool is set **once per machine** and never repeated per feature. It is personal: it lives in `~/.agenticos/config.yaml` (`worker: claude|kiro`), not in the shared repo, because teammates may use different tools.
 
-**Run override (new):** `aos board run --worker claude|kiro` launches every task in that run with that tool. The task's stored `worker` is updated, and an event records the switch. `board_start(feature, worker=)` does the same for the planner.
+- `aos init --worker claude|kiro` sets it during setup. `aos worker` prints the current tool and where it came from; `aos worker kiro` changes it.
+- `aos doctor` shows it, together with that tool's ACP readiness.
+
+**Precedence for a task's tool** (first match wins). Everything above the global setting is an optional exception:
+1. `aos task add … --worker claude|kiro` (exists), for one task;
+2. feature: `aos feature new <slug> --worker …` / `feature_create(…, worker=)`, for one feature;
+3. project: `projects.<slug>.worker.profile` (exists), for a project that needs another tool;
+4. **global (new): `worker` in `~/.agenticos/config.yaml`**;
+5. `board.default_worker` in the repo's `aos.yaml` (exists), the team fallback.
+
+**Run override:** `aos board run --worker claude|kiro` launches every task in that run with that tool. The task's stored `worker` is updated, and an event records the switch. `board_start(feature, worker=)` does the same for the planner.
 
 **Visibility:** `aos board`, `aos task list`, `board_status` and `board_wait` show `claude/acp`, `kiro/cli` and so on per task.
 
-**`aos-feature` skill:** when planning, it asks the user once "Claude or Kiro for this feature?" (unless a project or board default exists), and passes it to `feature_create`.
+**`aos-feature` skill:** no question when the global setting (or a project default) decides the tool. It asks "Claude or Kiro?" only when nothing is set. It then suggests `aos worker <tool>`, so the question is never asked again.
 
 ## 3. Transport
 
