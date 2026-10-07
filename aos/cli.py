@@ -273,6 +273,9 @@ def cmd_task(a) -> int:
     elif a.action == "retry":
         board.retry(a.id, note=a.note, worker=a.worker, resume=a.resume)
         print(f"task #{a.id} queued again")
+    elif a.action == "steer":
+        board.steer(a.id, a.message)
+        print(f"task #{a.id}: message queued; the worker reads it at its next board_read")
     elif a.action == "cancel":
         board.cancel(a.id)
         print(f"task #{a.id} cancelled")
@@ -454,6 +457,9 @@ def _parser() -> argparse.ArgumentParser:
     t.add_argument("--note")
     t.add_argument("--worker")
     tsub.add_parser("cancel").add_argument("id", type=int)
+    t = tsub.add_parser("steer", help="send guidance to a task's worker while it works")
+    t.add_argument("id", type=int)
+    t.add_argument("message")
     t = tsub.add_parser("unblock")
     t.add_argument("id", type=int)
     t.add_argument("--note")

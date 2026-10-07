@@ -54,3 +54,7 @@ def test_master_skill_covers_the_whole_flow():
         assert tool in text, tool
     for reason in ("attention", "stalled", "timeout", "waiting_on_human", "finished"):
         assert reason in text, reason
+
+
+def test_master_skill_can_steer_running_workers():
+    assert "task_steer" in (ROOT / "skills/aos-feature/SKILL.md").read_text()

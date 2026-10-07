@@ -116,7 +116,7 @@ WORKER_TOOLS = {"task_show", "board_read", "task_comment", "task_block", "task_p
                 "task_create", "task_complete"}
 PLANNER_TOOLS = {"feature_create", "feature_show", "task_create", "board_read", "board_start", "board_status",
                  "task_unblock", "task_retry", "task_cancel", "proposal_decide", "feature_workflow",
-                 "board_wait"}
+                 "board_wait", "task_steer"}
 
 
 class BoardTools:
@@ -173,7 +173,8 @@ class BoardTools:
         self.board.mark_seen(t["id"])
         return {"task": t, "feature": self.board.feature(t["feature"]), "brief": self.board.brief(t["feature"]),
                 "contract": self.board.contract(t["feature"]),
-                "depends_on": self.board.dependency_results(t["id"])}
+                "depends_on": self.board.dependency_results(t["id"]),
+                "messages_for_you": self.board.steer_messages(t["id"])[-10:]}
 
     @_safe
     def task_comment(self, text: str) -> dict:
@@ -205,14 +206,19 @@ class BoardTools:
     # -- both modes ----------------------------------------------------------
     @_safe
     def board_read(self, feature: str | None = None, since_event: int = 0) -> dict:
+        messages = None
         if self.task_id:
             t = self._own()
             feature = t["feature"]
             self.board.mark_seen(t["id"])
+            messages = self.board.steer_messages(t["id"], since_event)
         if not feature:
             raise AosError("feature is required")
-        return {"events": self.board.events(feature, since_event),
-                "contract_version": self.board.feature(feature)["contract_version"]}
+        out = {"events": self.board.events(feature, since_event),
+               "contract_version": self.board.feature(feature)["contract_version"]}
+        if messages is not None:
+            out["messages_for_you"] = messages  # from the user: follow them
+        return out
 
     @_safe
     def task_create(self, project: str, title: str, spec: str = "", depends_on: list[int] | None = None,
@@ -340,6 +346,11 @@ class BoardTools:
     def _status(self, tid: int) -> dict:
         t = self.board.task(tid)
         return {"task": t["id"], "status": t["status"]}
+
+    @_safe
+    def task_steer(self, task: int, message: str) -> dict:
+        self.board.steer(task, message, author="human")
+        return {"ok": True, "message": "the worker gets it at its next board_read"}
 
     @_safe
     def task_unblock(self, task: int, note: str = "") -> dict:
@@ -550,6 +561,11 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
         def board_wait(feature: str, cursor: dict | str | None = None, timeout_sec: float = 300) -> dict:
             """Wait (no tokens spent) until the feature needs the user (reason "attention"), needs board_start ("stalled"), is "finished", is "waiting_on_human" for an answer, or "timeout" passes. Always pass back the returned cursor."""
             return bt.board_wait(feature, cursor, timeout_sec)
+
+        @mcp.tool()
+        def task_steer(task: int, message: str) -> dict:
+            """Send the user's guidance to a task's worker while it works (it reads it at its next board_read)."""
+            return bt.task_steer(task, message)
 
         @mcp.tool()
         def task_unblock(task: int, note: str = "") -> dict:

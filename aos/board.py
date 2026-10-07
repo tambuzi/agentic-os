@@ -308,6 +308,22 @@ class Board:
     def feature_cost(self, feature: str) -> float:
         return self._rows("SELECT COALESCE(SUM(usd), 0) AS s FROM costs WHERE feature=?", (feature,))[0]["s"]
 
+    def steer(self, tid: int, message: str, author: str = "human") -> None:
+        """A message from the user for the task's worker, read at its next board_read."""
+        if not (message or "").strip():
+            raise AosError("steer message is empty")
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            if t["status"] in ("done", "cancelled", "failed"):
+                raise AosError(f"task #{tid} is {t['status']}; nothing is working on it to steer",
+                               "use aos task retry --note instead")
+            self._event(c, t["feature"], int(tid), "steer", author, message.strip())
+
+    def steer_messages(self, tid: int, since: int = 0) -> list[dict]:
+        t = self.task(tid)
+        return [{"id": e["id"], "ts": e["ts"], "message": e["body"]}
+                for e in self.events(t["feature"], since) if e["task"] == t["id"] and e["kind"] == "steer"]
+
     def log_event(self, tid: int, kind: str, body: str, author: str = "dispatcher") -> None:
         """A system event on a task's timeline (no state change)."""
         with self._tx() as c:

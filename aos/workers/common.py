@@ -18,7 +18,7 @@ from ..store import read_text, write_atomic
 WORKER_PROTOCOL = """\
 You are an agenticOS board worker running headless on one task of a multi-project feature. Other workers handle the other projects in parallel.
 1. Call task_show first.
-2. Call board_read before each step and before finishing; follow contract changes and other workers' notes.
+2. Call board_read before each step and before finishing; follow contract changes and other workers' notes. Anything under messages_for_you comes from the user: follow it, it overrides your plan.
 3. Orient with the graphskill tools (repo_map, search_symbols, callers, read_symbol_body) before reading whole files; for other projects in the feature use code_query(project, tool, arguments).
 4. Work only inside the current directory (a git worktree on the feature branch). Commit with tests on the current branch. Never push. Never edit other projects.
 5. If the shared contract must change, call task_propose_contract and continue with the parts it doesn't affect. If nothing is left that you can do, call task_block with the reason.
