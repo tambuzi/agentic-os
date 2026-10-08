@@ -90,6 +90,11 @@ def profile_settings(aos: AOS, profile: str, project: str) -> dict:
     for t in tools:
         if not NEUTRAL_TOOL.match(str(t)):
             raise AosError(f"invalid allowed tool {t!r}", "use read, write, shell:<command prefix> or mcp:<server>")
+    # the project's verify command is the user's own and aos runs it anyway: workers may run it too
+    verify = _project_worker(aos, project).get("verify_command")
+    if verify:
+        from ..acp.permissions import chain_segments
+        tools += [f"shell:{c}" for c in chain_segments(str(verify)) or []]
     s["allowed_tools"] = list(dict.fromkeys(tools))
     s.setdefault("adapter", profile)
     return s

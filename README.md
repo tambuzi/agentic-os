@@ -234,7 +234,7 @@ projects:
   shop-api:
     worker: {profile: claude, allowed_tools: ["shell:npm test", "shell:npm run lint"]}
 ```
-Workers never get "allow everything": only the listed tools, plus file edits inside their worktree.
+Workers never get "allow everything": only the listed tools, the project's `verify_command` (each command of it), and file edits inside their worktree.
 
 **In Kiro: drive it from the Workflows panel.** After planning, the agent can call `feature_workflow`, or you run:
 ```bash

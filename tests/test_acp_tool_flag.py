@@ -102,3 +102,20 @@ def test_aos_board_shows_tool(aos, capsys):
     board.set_transport(t, "acp")
     code, out, _ = run(["board"], capsys)
     assert "kiro/acp" in out
+
+
+@pytest.mark.parametrize("verify,rules", [
+    ("python3 test_calc.py", ["shell:python3 test_calc.py"]),
+    ("npm ci && npm test; npm run lint", ["shell:npm ci", "shell:npm test", "shell:npm run lint"]),
+    ("npm test > out.txt", []),  # not a plain chain: nothing implied
+])
+def test_the_projects_verify_command_is_allowed_to_workers(aos, verify, rules):
+    from aos.workers.common import profile_settings
+    p = aos.data / "projects.yaml"
+    d = yaml.safe_load(p.read_text())
+    d["projects"]["api"]["worker"] = {"verify_command": verify}
+    p.write_text(yaml.safe_dump(d))
+    allowed = profile_settings(aos, "claude", "api")["allowed_tools"]
+    assert all(r in allowed for r in rules)
+    assert not any(r.startswith("shell:npm test >") for r in allowed)
+    assert not any("python3" in r for r in profile_settings(aos, "claude", "web")["allowed_tools"])

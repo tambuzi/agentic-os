@@ -68,7 +68,7 @@ def _inside(path: str, worktree: Path) -> bool:
     return p == root or root in p.parents
 
 
-def _segments(cmd: str) -> list[str] | None:
+def chain_segments(cmd: str) -> list[str] | None:
     """The commands of a plain chain (a; b && c || d | e), or None for anything else."""
     if _NOT_A_PLAIN_CHAIN.search(cmd):
         return None
@@ -132,7 +132,7 @@ def decide(call: dict, allowed: list[str], worktree: str | Path) -> Decision:
         rule = f"shell:{head}" if head else None
         raw = _raw_command(call) or cmd
         if _CHAINING.search(raw):
-            segments = _segments(raw)  # a plain chain of allowed commands is fine
+            segments = chain_segments(raw)  # a plain chain of allowed commands is fine
             if segments and all(_allowed_command(s, allowed) for s in segments):
                 return Decision("allow", f"run `{cmd}`")
             return Decision("ask", f"run `{cmd}` (chained or redirected command)", rule)
