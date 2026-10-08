@@ -35,12 +35,16 @@ aos --help                       # if "command not found": add ~/.local/bin to y
 aos init ~/agenticOS --graphskill "graphskill"
 #   --graphskill: how to run graphskill, e.g. "/path/to/venv/bin/python -m graphskill"
 #   --data-dir:   optional other place for business data (must be outside the repo)
+#   --worker:     claude or kiro, the tool that runs board work on this machine (same as `aos worker`)
 
-# 4. Check
+# 4. Live worker sessions (ACP). Claude needs Node and a small adapter; Kiro needs nothing extra
+aos acp install claude
+
+# 5. Check
 aos doctor
 ```
 
-You want `doctor` to show `ok` for `aos on PATH`, `repo`, and `graphskill`. graphskill is optional: without it, linking still works and code-graph setup is skipped with a warning.
+You want `doctor` to show `ok` for `aos on PATH`, `repo`, and `graphskill`, and `claude: acp` / `kiro: acp` for the tool you use (otherwise workers fall back to one-shot CLI runs). graphskill is optional: without it, linking still works and code-graph setup is skipped with a warning.
 
 > **macOS + iCloud:** do not put the venv under `~/Desktop` or `~/Documents`. iCloud marks files there
 > `hidden`, and Python 3.13 silently ignores hidden `.pth` files, so the install breaks with
@@ -206,10 +210,22 @@ aos task retry 2 --resume --note "rename the button"   # feedback on a finished 
 
 **Where the work lands.** `~/.agenticos/worktrees/<feature>/<project>` on branch `feature/<feature>`. Your own checkouts are never touched, and nothing is pushed. Review the branches, then merge or open PRs yourself.
 
-**Claude Code or Kiro.** Each task runs on a worker profile:
+**Claude Code or Kiro.** Set it once per machine: `aos worker kiro` (or `claude`; `aos worker` shows the current one and where it comes from). Overrides, most specific first:
 1. `--worker` on the task;
-2. `projects.<slug>.worker.profile` in `~/.agenticos/data/projects.yaml`;
-3. `board.default_worker` in `aos.yaml`.
+2. `aos feature new <name> --worker kiro` for every task of a feature;
+3. `projects.<slug>.worker.profile` in `~/.agenticos/data/projects.yaml`;
+4. your global `aos worker` (in `~/.agenticos/config.yaml`, never in the repo);
+5. `board.default_worker` in `aos.yaml`.
+
+`aos board run --worker kiro` switches every task it starts for that run.
+
+**Live sessions (ACP).** Workers and reviewers run as live sessions over the Agent Client Protocol (`workers.<tool>.transport: acp`, the default). If the Claude adapter or Node is missing, that attempt falls back to the CLI and says so on the timeline. A live session gives:
+- **permission requests:** a tool call outside the allow-list doesn't fail the attempt. It waits for you: `aos board` lists it, `aos task approve <id> [--always]` / `aos task deny <id>` answer it (`--always` adds it to the project's `allowed_tools`). Unanswered after `board.approval_timeout_min` (30) → rejected. Dangerous ones (`git push`, `sudo`, edits outside the worktree) are rejected outright. A plain chain (`npm test; echo "exit=$?"`, `a && b`) is allowed when every command in it is; redirects, `$(…)` and `$VAR` still ask. Once you approve a request, the exact same one isn't asked again during that attempt. Each run's log (`aos task show <id> --log`) has the agent's stderr and the ACP messages (`>` sent, `<` received);
+- **stall detection:** no activity for `board.stall_min` (10) minutes, with no permission pending, ends the attempt;
+- **one nudge:** a worker that ends its turn without `task_complete` / `task_block` gets one reminder in the same session before the attempt counts as failed;
+- **mid-turn steering:** `aos task steer <id> "..."` reaches Claude inside its current turn; Kiro gets it after the running tool, or `--now` interrupts the turn and re-prompts;
+- **resume:** a retry reloads the previous session when the tool supports it;
+- **cost from the stream:** USD for Claude, credits for Kiro.
 
 Kiro workers need `kiro-cli` with `KIRO_API_KEY` (or a login). Allowed tools per project:
 ```yaml
@@ -218,7 +234,7 @@ projects:
   shop-api:
     worker: {profile: claude, allowed_tools: ["shell:npm test", "shell:npm run lint"]}
 ```
-Workers never get "allow everything": only the listed tools, plus file edits inside their worktree.
+Workers never get "allow everything": only the listed tools, the project's `verify_command` (each command of it), and file edits inside their worktree.
 
 **In Kiro: drive it from the Workflows panel.** After planning, the agent can call `feature_workflow`, or you run:
 ```bash
@@ -245,8 +261,8 @@ The board still does the execution, so Claude Code users keep `aos board run`. L
 - starts are staggered and gated by free memory (`board.parallel: auto`).
 
 **Cost:**
-- cost is recorded per attempt (Claude);
-- optional `board.task_budget_usd` / `feature_budget_usd` block further attempts once reached;
+- cost is recorded per attempt, in USD (Claude) or credits (Kiro);
+- optional `board.task_budget_usd` / `feature_budget_usd` and `task_budget_credits` / `feature_budget_credits` block further attempts once reached;
 - `aos task steer <id> "..."` sends guidance to a running worker.
 
 **Data.** The board is one SQLite file, `~/.agenticos/data/board.db` (no server). Feature files, logs and run contexts sit next to it. All of it is local.

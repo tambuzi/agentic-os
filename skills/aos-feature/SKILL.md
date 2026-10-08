@@ -24,6 +24,12 @@ You run the whole flow in this conversation. The user only steps in for decision
    - add dependencies only where a consumer truly cannot proceed without the provider.
 7. Show the brief, contract and task list (`#n project title ← depends on`). Adjust until the user approves. **Do not create anything before approval.**
 
+**Which tool runs the workers?**
+- The user's global setting decides (`aos worker`; set once per machine).
+- Don't ask if it's set, or if the projects have their own default.
+- Only when nothing is set: ask once, "Claude or Kiro?", and suggest `aos worker <tool>` so it's never asked again.
+- Use `feature_create(..., worker=)` only when the user wants a different tool for this one feature.
+
 ## 2. Create
 8. `feature_create(slug, title, brief, contract)`, then one `task_create(project, title, feature, spec, depends_on)` per task.
 
@@ -37,6 +43,7 @@ You run the whole flow in this conversation. The user only steps in for decision
       - `failed`: show `last_error`; ask retry (with guidance) or cancel.
       - `proposals`: show each `change` and `reason`; ask approve or reject.
       - `stuck`: a task waits on a failed or cancelled task (`waiting_on`); ask retry or cancel that task.
+      - `permissions`: a running worker asks to do something outside its allow-list (each has an `id` and a `summary`). Ask the user yes / no, and whether to always allow it for that project. The worker waits, and the request is refused after 30 minutes without an answer.
 
       Ask everything pending in one message, then **stop and wait for the user's reply**.
     - **stalled**: call `board_start(feature)`, then `board_wait` again.
@@ -48,6 +55,7 @@ You run the whole flow in this conversation. The user only steps in for decision
     - `task_unblock(task, note=<their answer>)`;
     - `task_retry(task, note=<their guidance>)` or `task_cancel(task)`;
     - `proposal_decide(proposal, approve, reason)`. On approve, the contract gets a new version that every worker must re-read.
+    - `permission_decide(permission, approve, always)`. No `board_start` is needed for these, because the worker is still running.
 
 ## 5. Finish
 12. Report each task's result (first line), anything cancelled, and where the work is: `~/.agenticos/worktrees/<feature>/<project>` on branch `feature/<feature>`. Nothing is pushed; the user reviews and merges.

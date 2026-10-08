@@ -56,8 +56,27 @@ def _project_worker(aos: AOS, project: str) -> dict:
     return ((aos.projects().get(project) or {}).get("worker")) or {}
 
 
-def resolve_profile(aos: AOS, project: str, requested: str | None = None) -> str:
-    return requested or _project_worker(aos, project).get("profile") or aos.settings["board"]["default_worker"]
+def resolve_tool(aos: AOS, project: str, requested: str | None = None,
+                 feature_worker: str | None = None) -> tuple[str, str]:
+    """(profile, where it came from). Precedence: task > feature > project > the user's
+    global setting (`aos worker`) > the team's board.default_worker."""
+    from ..config import global_worker
+    if requested:
+        return requested, "task"
+    if feature_worker:
+        return feature_worker, "feature"
+    project_profile = _project_worker(aos, project).get("profile")
+    if project_profile:
+        return project_profile, f"project {project}"
+    mine = global_worker()
+    if mine:
+        return mine, "global (aos worker)"
+    return aos.settings["board"]["default_worker"], "board default"
+
+
+def resolve_profile(aos: AOS, project: str, requested: str | None = None,
+                    feature_worker: str | None = None) -> str:
+    return resolve_tool(aos, project, requested, feature_worker)[0]
 
 
 def profile_settings(aos: AOS, profile: str, project: str) -> dict:
@@ -71,9 +90,31 @@ def profile_settings(aos: AOS, profile: str, project: str) -> dict:
     for t in tools:
         if not NEUTRAL_TOOL.match(str(t)):
             raise AosError(f"invalid allowed tool {t!r}", "use read, write, shell:<command prefix> or mcp:<server>")
+    # the project's verify command is the user's own and aos runs it anyway: workers may run it too
+    verify = _project_worker(aos, project).get("verify_command")
+    if verify:
+        from ..acp.permissions import chain_segments
+        tools += [f"shell:{c}" for c in chain_segments(str(verify)) or []]
     s["allowed_tools"] = list(dict.fromkeys(tools))
     s.setdefault("adapter", profile)
     return s
+
+
+def add_allowed_tool(aos: AOS, project: str, rule: str) -> None:
+    """`aos task approve --always`: remember a neutral rule in the project's local worker settings."""
+    import yaml
+    from ..store import locked
+    path = aos.data / "projects.yaml"
+    with locked(path):
+        data = yaml.safe_load(read_text(path)) or {}
+        proj = data.setdefault("projects", {}).setdefault(project, {}) or {}
+        data["projects"][project] = proj
+        worker = proj.setdefault("worker", {}) or {}
+        proj["worker"] = worker
+        tools = worker.setdefault("allowed_tools", [])
+        if rule not in tools:
+            tools.append(rule)
+        write_atomic(path, yaml.safe_dump(data, sort_keys=True, allow_unicode=True))
 
 
 def linked_project_path(project: str) -> Path:

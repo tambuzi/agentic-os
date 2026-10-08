@@ -20,7 +20,7 @@ import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
 
@@ -28,7 +28,11 @@ from .board import Board
 from .core import AOS
 from .errors import AosError
 from .workers import adapter
-from .workers.common import Launch, linked_project_path, parse_cost, prepare_review, prepare_run
+from .workers.common import (Launch, add_allowed_tool, linked_project_path, parse_cost, prepare_review,
+                             prepare_run)
+from .acp.permissions import decide
+from .acp.runner import AcpRun
+from .acp.tools import AdapterMissing, option_for
 from .sysmem import available_gb
 from .verify import head_commit, revert_to, verify_claim
 from .worktrees import branch_name, ensure_worktree, worktree_path
@@ -53,6 +57,11 @@ class Running:
     kind: str = "worker"              # or "reviewer"
     started_at: float = 0.0           # monotonic; recent starts reserve memory they haven't used yet
     log_path: Path | None = None      # the run's output, read for its cost when it exits
+    acp: AcpRun | None = None         # live ACP session (None = one-shot CLI process)
+    steer_since: int = 0              # last steer event already delivered to the live session
+    approved: set = field(default_factory=set)  # what the user allowed during this attempt (exact summaries)
+    allowed: list | None = None       # neutral allow-list, for ACP permission requests
+    worktree: Path | None = None
     generation: int = 0               # the attempt token it was launched with
 
 
@@ -117,11 +126,12 @@ def _warn(msg: str) -> None:
 
 class Dispatcher:
     def __init__(self, repo: str | Path, *, feature: str | None = None, parallel: int | None = None,
-                 tick: float = 2.0):
+                 tick: float = 2.0, worker: str | None = None):
         self.aos = AOS(repo)
         board_cfg = self.aos.settings["board"]
         self.board = Board(self.aos.data, board_cfg["max_tasks_per_feature"])
         self.feature = feature
+        self.worker = worker  # run override: launch every task with this tool
         setting = parallel if parallel is not None else board_cfg["parallel"]
         # `auto`: the ceiling is max_parallel; free memory decides each start (see _may_start)
         self.parallel = int(board_cfg.get("max_parallel", 6) if str(setting) == "auto" else setting)
@@ -142,6 +152,8 @@ class Dispatcher:
         self.once = False
         self.aos_bin = shutil.which("aos") or "aos"
         self._last_stuck: dict | None = None
+        # permission id -> (task, Running, json-rpc request id, options, rule, asked at)
+        self.pending_perms: dict[int, tuple] = {}
 
     # -- lifecycle -----------------------------------------------------------
     @contextmanager
@@ -168,6 +180,8 @@ class Dispatcher:
     def recover(self) -> None:
         """Tasks left `running` by a previous dispatcher: stop the old worker only if it is
         provably ours (same pid *and* start time), then count a failed attempt."""
+        for p in self.board.permissions(status="pending"):
+            self.board.expire_permission(p["id"], "the dispatcher restarted")
         for t in self.board.tasks(status="running"):
             pid = t["pid"]
             if pid and t.get("proc_start") and process_start(pid) == t["proc_start"]:
@@ -208,6 +222,8 @@ class Dispatcher:
                     # finish what this round started, including verifying its claims
                     while self.running or self.verifying or self.board.reviewable(self.feature):
                         time.sleep(self.tick_s)
+                        self._service_acp()
+                        self._resolve_permissions()
                         self._reap()
                         self._collect_verifications()
                         self._start_verifications()
@@ -232,6 +248,8 @@ class Dispatcher:
 
     # -- one tick ------------------------------------------------------------
     def tick(self) -> None:
+        self._service_acp()
+        self._resolve_permissions()
         self._reap()
         self._collect_verifications()
         try:
@@ -296,7 +314,182 @@ class Dispatcher:
         self._last_stuck = stuck
 
     def _terminate(self, r: Running) -> None:
+        if r.acp:
+            r.acp.session.cancel()
+            r.acp.close()
         _kill_group(r.proc.pid, proc=r.proc)
+
+    # -- live ACP sessions -------------------------------------------------------
+    def _service_acp(self) -> None:
+        """Drain each live session's events on this thread; close a session once its turn
+        is over (the process then exits and is reaped like any other)."""
+        for tid, r in list(self.running.items()):
+            if not r.acp or r.acp.closed:
+                continue
+            try:
+                r.acp.session.drain(on_request=lambda rid, m, p, tid=tid, r=r: self._on_agent_request(tid, r, rid, m, p))
+                if r.kind == "worker" and self._still_owns(r, self.board.task(tid)):
+                    self._deliver_steers(tid, r)  # the user's words for the worker, never its reviewer
+                self._service_turn(tid, r)
+            except TASK_ERRORS as e:
+                _warn(f"task #{tid}: {e}")
+
+    NUDGES = {
+        "worker": ("You ended your turn without calling task_complete or task_block. Finish the task now and call "
+                   "task_complete(summary), or call task_block(reason) if you cannot."),
+        "reviewer": ("You ended your turn without a verdict. Call review_pass(summary) or review_fail(findings) now."),
+    }
+
+    def _service_turn(self, tid: int, r: Running) -> None:
+        acp = r.acp
+        if acp.turn_finished():
+            if acp.reprompt is not None:  # Kiro steer --now: the cancelled turn is over, send the message
+                text, acp.reprompt = acp.reprompt, None
+                acp.session.prompt(text)
+                return
+            stop, error = acp.session.turn_outcome()
+            if error:
+                acp.end_reason = f"turn failed: {error}"
+                acp.close()
+                return
+            if stop == "refusal":
+                if acp.tool == "kiro" and not acp.refusal_retried:  # Kiro can refuse right after a cancel
+                    acp.refusal_retried = True
+                    acp.session.prompt(acp.session.last_prompt)
+                    return
+                acp.end_reason = "the model refused the turn (stopReason: refusal)"
+                acp.close()
+                return
+            if self._still_owns(r, self.board.task(tid)) and not acp.nudged:
+                acp.nudged = True  # one reminder in the same session before the attempt counts as failed
+                acp.session.prompt(self.NUDGES[r.kind])
+                return
+            acp.close()
+            return
+        waiting = any(entry[1] is r for entry in self.pending_perms.values())
+        stall_s = 60 * float(self.aos.settings["board"].get("stall_min", 10))
+        if not waiting and acp.reprompt is None and time.monotonic() - acp.conn.last_activity > stall_s:
+            acp.stalled = True
+            self._cancel_turn(r, "the worker stalled")
+            acp.close()
+
+    def _cancel_turn(self, r: Running, why: str) -> None:
+        """session/cancel, answering the run's open permission requests `cancelled` first
+        (ACP requires it; otherwise the turn never ends)."""
+        for pid, entry in list(self.pending_perms.items()):
+            if entry[1] is r:
+                del self.pending_perms[pid]
+                try:
+                    r.acp.conn.respond(entry[2], {"outcome": {"outcome": "cancelled"}})
+                except Exception as e:
+                    _warn(f"permission answer not delivered: {e}")
+                self.board.expire_permission(pid, why)
+        r.acp.session.cancel()
+
+    def _deliver_steers(self, tid: int, r: Running) -> None:
+        for m in self.board.steer_messages(tid, since=r.steer_since):
+            r.steer_since = m["id"]
+            if m["now"] and r.acp.tool == "kiro":
+                self._cancel_turn(r, "the user changed the plan")
+                r.acp.reprompt = f"Change of plan from the user: {m['message']}"
+                self.board.log_event(tid, "steer_delivered", f"turn cancelled; next prompt: {m['message']}")
+                continue
+            outcome = r.acp.session.steer(m["message"])
+            if outcome == "queued":
+                self.board.log_event(tid, "steer_queued", f"after the running tool: {m['message']}")
+            elif outcome:
+                self.board.log_event(tid, "steer_delivered", m["message"])
+            else:
+                self.board.log_event(tid, "status", "steer not delivered live; the worker reads it at its next board_read")
+
+    def _on_agent_request(self, tid: int, r: Running, req_id, method: str, params: dict) -> None:
+        conn = r.acp.conn
+        if method != "session/request_permission":
+            conn.respond(req_id, error={"code": -32601, "message": f"aos does not implement {method}"})
+            return
+        verdict = decide(params.get("toolCall") or {}, r.allowed or [], r.worktree or Path("."))
+        options = params.get("options") or []
+        if verdict.decision == "ask" and verdict.summary in r.approved:
+            verdict.decision = "allow"  # the user already allowed exactly this during this attempt
+        if verdict.decision == "ask":  # the user decides; the worker waits (not a stall)
+            pid = self.board.request_permission(tid, verdict.summary, json.dumps(params.get("toolCall") or {})[:4000],
+                                                verdict.rule, generation=r.generation, role=r.kind)
+            self.pending_perms[pid] = (tid, r, req_id, options, verdict.rule, time.monotonic())
+            return
+        if verdict.decision == "reject":
+            self.board.log_event(tid, "status", f"permission refused: {verdict.summary}")
+        self._answer_permission(r, req_id, options, verdict.decision)
+
+    @staticmethod
+    def _answer_permission(r: Running, req_id, options: list, decision: str) -> None:
+        choice = option_for(decision, options)
+        try:
+            r.acp.conn.respond(req_id, {"outcome": {"outcome": "selected", "optionId": choice}} if choice
+                               else {"outcome": {"outcome": "cancelled"}})
+        except Exception as e:  # the agent may be gone already
+            _warn(f"permission answer not delivered: {e}")
+
+    def _resolve_permissions(self) -> None:
+        """Answer waiting permission requests the user decided; refuse ones nobody answered."""
+        timeout = 60 * float(self.aos.settings["board"].get("approval_timeout_min", 30))
+        for pid, (tid, r, req_id, options, rule, asked) in list(self.pending_perms.items()):
+            try:
+                p = self.board.permission(pid)
+                live = self.running.get(tid) is r and r.acp and not r.acp.closed
+                if not live:
+                    self.board.expire_permission(pid, "the worker is gone")
+                elif p["status"] == "approved":
+                    r.acp.conn.last_activity = time.monotonic()  # the wait for the user isn't silence
+                    r.approved.add(p["summary"])
+                    if p["always"] and rule:
+                        aos = AOS(self.aos.repo, home=self.aos.home, data=self.aos.data)
+                        add_allowed_tool(aos, r.project, rule)
+                        r.allowed = [*(r.allowed or []), rule]
+                    self._answer_permission(r, req_id, options, "allow")  # never the agent's own "always"
+                elif p["status"] in ("denied", "expired"):
+                    self._answer_permission(r, req_id, options, "reject")
+                elif time.monotonic() - asked > timeout:
+                    self.board.expire_permission(pid, "no answer in time")
+                    self._answer_permission(r, req_id, options, "reject")
+                else:
+                    continue
+            except TASK_ERRORS as e:
+                _warn(f"permission #{pid}: {e}")
+            del self.pending_perms[pid]
+
+    def _last_event_id(self, feature: str) -> int:
+        events = self.board.events(feature, limit=1)
+        return events[-1]["id"] if events else 0
+
+    def _spawn(self, tid: int, spec, settings: dict, mod, log_path: Path):
+        """Start a worker/reviewer: a live ACP session when the profile's transport is acp
+        (falling back to the CLI if ACP is unavailable here), else a one-shot process.
+        Returns (proc, launch, acp, log, transport)."""
+        tool = settings.get("adapter")
+        if settings.get("transport") == "acp" and tool in ("claude", "kiro"):
+            launch = mod.prepare(spec, settings) if tool == "kiro" else Launch([], spec.worktree, {})
+            acp = AcpRun(tool, settings, self.aos.home, log_path)
+            try:
+                from .workers import kiro as kiro_mod
+                acp.start(spec, kiro_agent=kiro_mod.agent_name(spec.task) if tool == "kiro" else None,
+                          resume_id=spec.session_id if spec.resume else None)
+                return acp.proc, launch, acp, None, "acp"
+            except AdapterMissing as e:
+                launch.cleanup()
+                self.board.log_event(tid, "status", f"ACP unavailable ({e.message}); using the CLI for this attempt")
+            except Exception:
+                launch.cleanup()
+                raise
+        launch = mod.prepare(spec, settings)
+        log = open(log_path, "ab")
+        try:
+            proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env=launch.env, stdin=subprocess.DEVNULL,
+                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        except Exception:
+            log.close()
+            launch.cleanup()
+            raise
+        return proc, launch, None, log, "cli"
 
     def _reap(self) -> None:
         for tid, r in list(self.running.items()):
@@ -333,20 +526,39 @@ class Dispatcher:
                 return
         # the leader exited; stop anything it left behind in its process group
         _kill_group(r.proc.pid, wait=1.0, proc=r.proc)
+        if r.acp:
+            r.acp.close()
+            if r.acp.session:  # cost still queued when it closed; requests get no answer (it's gone)
+                r.acp.session.drain(on_request=lambda *_: None)
+            for pid, entry in list(self.pending_perms.items()):
+                if entry[1] is r:
+                    del self.pending_perms[pid]
+            for p in self.board.permissions(task=tid, status="pending"):
+                self.board.expire_permission(p["id"], "the worker is gone")
         r.launch.cleanup()
-        r.log.close()
+        if r.log:
+            r.log.close()
         del self.running[tid]
         self._record_cost(tid, r)
         task = self.board.task(tid)
         if not self._still_owns(r, task):
             return
+        stall_min = float(self.aos.settings["board"].get("stall_min", 10))
         if r.kind == "reviewer":
             why = (f"timed out after {r.timeout_min:g} min" if r.timed_out
+                   else f"stalled: no activity for {stall_min:g} min" if r.acp and r.acp.stalled
+                   else r.acp.end_reason if r.acp and r.acp.end_reason
                    else f"exited with code {code}" if code else "exited without a verdict")
             self.board.review_unfinished(tid, why)
             return
         if r.timed_out:
             why = f"timed out after {r.timeout_min:g} min"
+        elif r.acp and r.acp.stalled:
+            why = f"stalled: no activity for {stall_min:g} min"
+        elif r.acp and r.acp.end_reason:
+            why = r.acp.end_reason
+        elif r.acp and r.acp.nudged:
+            why = "ended its turn without task_complete, even after a nudge"
         elif code in r.exit_reasons:  # the tool says it never got going (e.g. MCP startup)
             self.board.attempt_failed(tid, r.exit_reasons[code], ran=False)
             return
@@ -357,6 +569,11 @@ class Dispatcher:
         self.board.attempt_failed(tid, why)
 
     def _record_cost(self, tid: int, r: Running) -> None:
+        if r.acp:
+            if r.acp.session and r.acp.session.cost > 0:
+                self.board.add_cost(tid, r.acp.session.cost, role=r.kind, generation=r.generation,
+                                    unit=r.acp.session.cost_unit)
+            return
         if not r.log_path:
             return
         try:
@@ -371,17 +588,18 @@ class Dispatcher:
 
     def _over_budget(self, t: dict) -> str | None:
         cfg = self.aos.settings["board"]
-        task_budget, feature_budget = cfg.get("task_budget_usd"), cfg.get("feature_budget_usd")
-        if task_budget is not None:
-            spent = self.board.task_cost(t["id"])
-            if spent >= float(task_budget):
-                return (f"task budget reached: ${spent:.2f} of ${float(task_budget):.2f} spent; raise "
-                        "board.task_budget_usd in aos.yaml and unblock, or cancel the task")
-        if feature_budget is not None:
-            spent = self.board.feature_cost(t["feature"])
-            if spent >= float(feature_budget):
-                return (f"feature budget reached: ${spent:.2f} of ${float(feature_budget):.2f} spent on "
-                        f"{t['feature']}; raise board.feature_budget_usd in aos.yaml and unblock")
+        for unit, suffix, fmt in (("USD", "usd", "${:.2f}"), ("credit", "credits", "{:.2f} credits")):
+            task_budget, feature_budget = cfg.get(f"task_budget_{suffix}"), cfg.get(f"feature_budget_{suffix}")
+            if task_budget is not None:
+                spent = self.board.task_cost(t["id"], unit)
+                if spent >= float(task_budget):
+                    return (f"task budget reached: {fmt.format(spent)} of {fmt.format(float(task_budget))} spent; "
+                            f"raise board.task_budget_{suffix} in aos.yaml and unblock, or cancel the task")
+            if feature_budget is not None:
+                spent = self.board.feature_cost(t["feature"], unit)
+                if spent >= float(feature_budget):
+                    return (f"feature budget reached: {fmt.format(spent)} of {fmt.format(float(feature_budget))} "
+                            f"spent on {t['feature']}; raise board.feature_budget_{suffix} in aos.yaml and unblock")
         return None
 
     def _launch_ready(self) -> None:
@@ -466,12 +684,9 @@ class Dispatcher:
             aos = AOS(self.aos.repo, home=self.aos.home, slug=t["project"], data=self.aos.data)
             spec, settings = prepare_review(aos, self.board, task, wt, project_path, self.aos_bin)
             mod = adapter(settings["adapter"])
-            launch = mod.prepare(spec, settings)
             log_path = self.board.data / "logs" / f"{tid}-review-{task['review_attempts']}.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            log = open(log_path, "ab")
-            proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env=launch.env, stdin=subprocess.DEVNULL,
-                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            proc, launch, acp, log, transport = self._spawn(tid, spec, settings, mod, log_path)
         except Exception as e:  # a reviewer that cannot start counts as a review without verdict
             if launch:
                 launch.cleanup()
@@ -481,11 +696,14 @@ class Dispatcher:
         self.running[tid] = Running(proc, launch, time.monotonic() + 60 * timeout, timeout, log,
                                     getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"],
                                     kind="reviewer", generation=task["generation"], started_at=time.monotonic(),
-                                    log_path=log_path)
+                                    log_path=log_path, acp=acp, allowed=spec.allowed, worktree=spec.worktree)
         self._last_start = time.monotonic()
 
     def _launch(self, t: dict) -> None:
         tid = t["id"]
+        if self.worker and t["worker"] != self.worker:
+            self.board.set_worker(tid, self.worker, why=" for this run (aos board run --worker)")
+            t = {**t, "worker": self.worker}
         over = self._over_budget(t)
         if over:
             self.board.block(tid, over, author="dispatcher")
@@ -506,12 +724,9 @@ class Dispatcher:
             aos = AOS(self.aos.repo, home=self.aos.home, slug=t["project"], data=self.aos.data)
             spec, settings = prepare_run(aos, self.board, task, wt, project_path, self.aos_bin)
             mod = adapter(settings["adapter"])
-            launch = mod.prepare(spec, settings)
             log_path = self.board.data / "logs" / f"{tid}-{task['attempts']}.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            log = open(log_path, "ab")
-            proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env=launch.env, stdin=subprocess.DEVNULL,
-                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            proc, launch, acp, log, transport = self._spawn(tid, spec, settings, mod, log_path)
         except Exception as e:  # any launch failure is a failed attempt, never a crash of the loop
             if launch:
                 launch.cleanup()
@@ -521,6 +736,9 @@ class Dispatcher:
         self.running[tid] = Running(proc, launch, time.monotonic() + 60 * timeout, timeout, log,
                                     getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"],
                                     generation=task["generation"], started_at=time.monotonic(),
-                                    log_path=log_path)
+                                    log_path=log_path, acp=acp, allowed=spec.allowed, worktree=spec.worktree,
+                                    steer_since=self._last_event_id(t["feature"]))
         self._last_start = time.monotonic()
-        self.board.set_process(tid, proc.pid, launch.session_id, proc_start=process_start(proc.pid))
+        self.board.set_transport(tid, transport)
+        session_id = acp.session.session_id if acp else launch.session_id
+        self.board.set_process(tid, proc.pid, session_id, proc_start=process_start(proc.pid))

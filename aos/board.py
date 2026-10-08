@@ -24,14 +24,14 @@ CONTRACT_HEADER = "<!-- aos contract v{} -->"
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS features(
   slug TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open',
-  contract_version INTEGER NOT NULL DEFAULT 1, created TEXT NOT NULL);
+  contract_version INTEGER NOT NULL DEFAULT 1, created TEXT NOT NULL, worker TEXT);
 CREATE TABLE IF NOT EXISTS tasks(
   id INTEGER PRIMARY KEY AUTOINCREMENT, feature TEXT NOT NULL, project TEXT NOT NULL,
   title TEXT NOT NULL, spec TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'todo',
   worker TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL,
   contract_seen INTEGER, result TEXT, session_id TEXT, pid INTEGER, proc_start TEXT, note TEXT,
   generation INTEGER NOT NULL DEFAULT 0, resume_hint INTEGER NOT NULL DEFAULT 0, last_failure TEXT,
-  base_commit TEXT, feedback TEXT, review_stage TEXT, review_attempts INTEGER NOT NULL DEFAULT 0, revert_to TEXT,
+  base_commit TEXT, feedback TEXT, review_stage TEXT, review_attempts INTEGER NOT NULL DEFAULT 0, revert_to TEXT, transport TEXT,
   resume INTEGER NOT NULL DEFAULT 0, started TEXT, updated TEXT NOT NULL, created_by TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS deps(task INTEGER NOT NULL, depends_on INTEGER NOT NULL,
   PRIMARY KEY(task, depends_on));
@@ -43,7 +43,13 @@ CREATE TABLE IF NOT EXISTS proposals(
   reason TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', decided TEXT);
 CREATE TABLE IF NOT EXISTS costs(
   id INTEGER PRIMARY KEY AUTOINCREMENT, task INTEGER NOT NULL, feature TEXT NOT NULL,
-  generation INTEGER, role TEXT NOT NULL, usd REAL NOT NULL, ts TEXT NOT NULL);
+  generation INTEGER, role TEXT NOT NULL, usd REAL NOT NULL, ts TEXT NOT NULL,
+  unit TEXT NOT NULL DEFAULT 'USD');  -- usd holds the amount; unit is USD or credit
+CREATE TABLE IF NOT EXISTS permissions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, task INTEGER NOT NULL, feature TEXT NOT NULL, generation INTEGER,
+  role TEXT NOT NULL, summary TEXT NOT NULL, raw TEXT, rule TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',  -- pending | approved | denied | expired
+  always INTEGER NOT NULL DEFAULT 0, requested TEXT NOT NULL, decided TEXT);
 """
 
 
@@ -81,6 +87,10 @@ class Board:
         c.execute("PRAGMA busy_timeout=5000")
         c.execute("PRAGMA journal_mode=WAL")
         c.executescript(SCHEMA)
+        if "unit" not in {r["name"] for r in c.execute("PRAGMA table_info(costs)")}:
+            c.execute("ALTER TABLE costs ADD COLUMN unit TEXT NOT NULL DEFAULT 'USD'")  # credits (Kiro)
+        if "worker" not in {r["name"] for r in c.execute("PRAGMA table_info(features)")}:
+            c.execute("ALTER TABLE features ADD COLUMN worker TEXT")  # feature default tool
         cols = {r["name"] for r in c.execute("PRAGMA table_info(tasks)")}
         if "proc_start" not in cols:  # boards created before proc_start existed
             c.execute("ALTER TABLE tasks ADD COLUMN proc_start TEXT")
@@ -91,7 +101,8 @@ class Board:
                            ("feedback", "TEXT"),                              # why a claim was rejected
                            ("review_stage", "TEXT"),                          # None | verified | reviewing
                            ("review_attempts", "INTEGER NOT NULL DEFAULT 0"),  # reviewer launches
-                           ("revert_to", "TEXT")):                            # rejected work to undo
+                           ("revert_to", "TEXT"),                             # rejected work to undo
+                           ("transport", "TEXT")):                            # acp | cli (last attempt)
             if name not in cols:  # boards created before the column existed
                 c.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
         return c
@@ -140,15 +151,15 @@ class Board:
         return self.data / "features" / slug
 
     def create_feature(self, slug: str, title: str, brief: str = "", contract: str = "",
-                       author: str = "human") -> dict:
+                       author: str = "human", worker: str | None = None) -> dict:
         check_slug(slug, "feature")
         if not (title or "").strip():
             raise AosError("feature needs a title")
         with self._tx() as c:
             if c.execute("SELECT 1 FROM features WHERE slug=?", (slug,)).fetchone():
                 raise AosError(f"feature {slug!r} already exists")
-            c.execute("INSERT INTO features(slug, title, status, contract_version, created) "
-                      "VALUES (?,?,?,?,?)", (slug, title.strip(), "open", 1, now()))
+            c.execute("INSERT INTO features(slug, title, status, contract_version, created, worker) "
+                      "VALUES (?,?,?,?,?,?)", (slug, title.strip(), "open", 1, now(), worker or None))
             self._event(c, slug, None, "status", author, f"feature created: {title.strip()}")
             d = self.feature_dir(slug)
             write_atomic(d / "brief.md", brief)
@@ -293,23 +304,77 @@ class Board:
                            "stop working on this task; another attempt owns it now")
 
     # -- cost (Kiro Crew: per-item credit budgets) --------------------------------
-    def add_cost(self, tid: int, usd: float, role: str = "worker", generation: int | None = None) -> None:
+    def add_cost(self, tid: int, usd: float, role: str = "worker", generation: int | None = None,
+                 unit: str = "USD") -> None:
+        """Record an attempt's cost. `usd` is the amount, in `unit` (USD, or credit for Kiro)."""
         with self._tx() as c:
             t = self._task_row(c, tid)
-            c.execute("INSERT INTO costs(task, feature, generation, role, usd, ts) VALUES (?,?,?,?,?,?)",
-                      (int(tid), t["feature"], generation, role, float(usd), now()))
+            c.execute("INSERT INTO costs(task, feature, generation, role, usd, ts, unit) VALUES (?,?,?,?,?,?,?)",
+                      (int(tid), t["feature"], generation, role, float(usd), now(), unit))
 
     def costs(self, tid: int) -> list[dict]:
         return self._rows("SELECT * FROM costs WHERE task=? ORDER BY id", (int(tid),))
 
-    def task_cost(self, tid: int) -> float:
-        return self._rows("SELECT COALESCE(SUM(usd), 0) AS s FROM costs WHERE task=?", (int(tid),))[0]["s"]
+    def task_cost(self, tid: int, unit: str = "USD") -> float:
+        return self._rows("SELECT COALESCE(SUM(usd), 0) AS s FROM costs WHERE task=? AND unit=?",
+                          (int(tid), unit))[0]["s"]
 
-    def feature_cost(self, feature: str) -> float:
-        return self._rows("SELECT COALESCE(SUM(usd), 0) AS s FROM costs WHERE feature=?", (feature,))[0]["s"]
+    def feature_cost(self, feature: str, unit: str = "USD") -> float:
+        return self._rows("SELECT COALESCE(SUM(usd), 0) AS s FROM costs WHERE feature=? AND unit=?",
+                          (feature, unit))[0]["s"]
 
-    def steer(self, tid: int, message: str, author: str = "human") -> None:
-        """A message from the user for the task's worker, read at its next board_read."""
+    # -- permission requests from live (ACP) workers ------------------------------
+    def request_permission(self, tid: int, summary: str, raw: str = "", rule: str | None = None,
+                           generation: int | None = None, role: str = "worker") -> int:
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            cur = c.execute("INSERT INTO permissions(task, feature, generation, role, summary, raw, rule, requested) "
+                            "VALUES (?,?,?,?,?,?,?,?)", (int(tid), t["feature"], generation, role, summary, raw,
+                                                        rule, now()))
+            pid = cur.lastrowid
+            self._event(c, t["feature"], int(tid), "permission", f"{role}:{tid}",
+                        f"permission #{pid} requested: {summary}")
+        return pid
+
+    def permission(self, pid: int) -> dict:
+        rows = self._rows("SELECT * FROM permissions WHERE id=?", (int(pid),))
+        if not rows:
+            raise AosError(f"unknown permission request #{pid}", "aos board shows pending ones")
+        return rows[0]
+
+    def permissions(self, task: int | None = None, status: str | None = None, feature: str | None = None) -> list[dict]:
+        sql, params = "SELECT * FROM permissions WHERE 1=1", []
+        for col, val in (("task", task), ("status", status), ("feature", feature)):
+            if val is not None:
+                sql, params = sql + f" AND {col}=?", params + [val]
+        return self._rows(sql + " ORDER BY id", params)
+
+    def decide_permission(self, pid: int, approve: bool, always: bool = False, author: str = "human") -> dict:
+        with self._tx() as c:
+            p = c.execute("SELECT * FROM permissions WHERE id=?", (int(pid),)).fetchone()
+            if not p:
+                raise AosError(f"unknown permission request #{pid}")
+            if p["status"] != "pending":
+                raise AosError(f"permission request #{pid} is already {p['status']}")
+            status = "approved" if approve else "denied"
+            c.execute("UPDATE permissions SET status=?, always=?, decided=? WHERE id=?",
+                      (status, 1 if (approve and always) else 0, now(), int(pid)))
+            self._event(c, p["feature"], p["task"], "decision", author,
+                        f"permission #{pid} {status}{' (always)' if approve and always else ''}: {p['summary']}")
+        return self.permission(pid)
+
+    def expire_permission(self, pid: int, why: str) -> None:
+        with self._tx() as c:
+            p = c.execute("SELECT * FROM permissions WHERE id=?", (int(pid),)).fetchone()
+            if not p or p["status"] != "pending":
+                return
+            c.execute("UPDATE permissions SET status='expired', decided=? WHERE id=?", (now(), int(pid)))
+            self._event(c, p["feature"], p["task"], "decision", "dispatcher",
+                        f"permission #{pid} refused ({why}): {p['summary']}")
+
+    def steer(self, tid: int, message: str, author: str = "human", now: bool = False) -> None:
+        """A message from the user for the task's worker: delivered live to an ACP session,
+        and readable at its next board_read. `now`: interrupt the current turn for it."""
         if not (message or "").strip():
             raise AosError("steer message is empty")
         with self._tx() as c:
@@ -317,12 +382,27 @@ class Board:
             if t["status"] in ("done", "cancelled", "failed"):
                 raise AosError(f"task #{tid} is {t['status']}; nothing is working on it to steer",
                                "use aos task retry --note instead")
-            self._event(c, t["feature"], int(tid), "steer", author, message.strip())
+            self._event(c, t["feature"], int(tid), "steer_now" if now else "steer", author, message.strip())
 
     def steer_messages(self, tid: int, since: int = 0) -> list[dict]:
         t = self.task(tid)
-        return [{"id": e["id"], "ts": e["ts"], "message": e["body"]}
-                for e in self.events(t["feature"], since) if e["task"] == t["id"] and e["kind"] == "steer"]
+        return [{"id": e["id"], "ts": e["ts"], "message": e["body"], "now": e["kind"] == "steer_now"}
+                for e in self.events(t["feature"], since)
+                if e["task"] == t["id"] and e["kind"] in ("steer", "steer_now")]
+
+    def set_worker(self, tid: int, worker: str, author: str = "dispatcher", why: str = "") -> None:
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            if t["worker"] == worker:
+                return
+            c.execute("UPDATE tasks SET worker=?, updated=? WHERE id=?", (worker, now(), int(tid)))
+            self._event(c, t["feature"], int(tid), "status", author,
+                        f"tool switched{why}: {t['worker']} -> {worker}")
+
+    def set_transport(self, tid: int, transport: str) -> None:
+        with self._tx() as c:
+            self._task_row(c, tid)
+            c.execute("UPDATE tasks SET transport=? WHERE id=?", (transport, int(tid)))
 
     def log_event(self, tid: int, kind: str, body: str, author: str = "dispatcher") -> None:
         """A system event on a task's timeline (no state change)."""

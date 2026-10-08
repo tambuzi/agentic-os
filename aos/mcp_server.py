@@ -116,7 +116,7 @@ WORKER_TOOLS = {"task_show", "board_read", "task_comment", "task_block", "task_p
                 "task_create", "task_complete"}
 PLANNER_TOOLS = {"feature_create", "feature_show", "task_create", "board_read", "board_start", "board_status",
                  "task_unblock", "task_retry", "task_cancel", "proposal_decide", "feature_workflow",
-                 "board_wait", "task_steer"}
+                 "board_wait", "task_steer", "permission_decide"}
 
 
 class BoardTools:
@@ -160,7 +160,7 @@ class BoardTools:
     def _new_task(self, feature: str, project: str, title: str, spec: str, depends_on) -> dict:
         if project not in self.aos.projects():
             raise AosError(f"unknown project {project!r}", "call project_list; link it with aos link")
-        profile = resolve_profile(self.aos, project)
+        profile = resolve_profile(self.aos, project, feature_worker=self.board.feature(feature).get("worker"))
         attempts = profile_settings(self.aos, profile, project)["max_attempts"]
         tid = self.board.add_task(feature, project, title, spec, depends_on or [], worker=profile,
                                   max_attempts=attempts, created_by=self.author)
@@ -233,11 +233,14 @@ class BoardTools:
 
     # -- planner mode --------------------------------------------------------
     @_safe
-    def feature_create(self, slug: str, title: str, brief: str = "", contract: str = "") -> dict:
-        return self.board.create_feature(slug, title, brief, contract, author=self.author)
+    def feature_create(self, slug: str, title: str, brief: str = "", contract: str = "",
+                       worker: str | None = None) -> dict:
+        if worker:
+            profile_settings(self.aos, worker, "")  # validates the tool name
+        return self.board.create_feature(slug, title, brief, contract, author=self.author, worker=worker)
 
     @_safe
-    def board_start(self, feature: str, parallel: int | None = None) -> dict:
+    def board_start(self, feature: str, parallel: int | None = None, worker: str | None = None) -> dict:
         """Start the dispatcher in the background for one feature. It launches a separate
         headless worker per task and exits by itself when nothing more can run."""
         from .dispatcher import dispatcher_status
@@ -254,6 +257,8 @@ class BoardTools:
         log = self.board.data / "logs" / f"dispatcher-{feature}.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         argv = [sys.executable, "-m", "aos", "board", "run", "--feature", feature, "--until-done"]
+        if worker:
+            argv += ["--worker", worker]
         if parallel:
             argv += ["--parallel", str(int(parallel))]
         with open(log, "ab") as fh:
@@ -286,7 +291,7 @@ class BoardTools:
             "counts": counts,
             "cost_usd": round(self.board.feature_cost(feature), 4),
             "tasks": [{"id": t["id"], "project": t["project"], "title": t["title"], "status": t["status"],
-                       "worker": t["worker"], "attempts": t["attempts"],
+                       "worker": t["worker"], "transport": t.get("transport"), "attempts": t["attempts"],
                        "cost_usd": round(self.board.task_cost(t["id"]), 4),
                        "result": (t["result"] or "").splitlines()[0] if t["result"] else None} for t in tasks],
             "blocked": [{"task": t["id"], "project": t["project"], "reason": blockers.get(t["id"], "")}
@@ -294,6 +299,7 @@ class BoardTools:
             "stuck": {str(k): v for k, v in self.board.stuck().items()
                       if any(t["id"] == k for t in tasks)},
             "pending_proposals": self.board.proposals(feature, "pending"),
+            "pending_permissions": self.board.permissions(feature=feature, status="pending"),
         }
 
     @_safe
@@ -348,9 +354,15 @@ class BoardTools:
         return {"task": t["id"], "status": t["status"]}
 
     @_safe
-    def task_steer(self, task: int, message: str) -> dict:
-        self.board.steer(task, message, author="human")
-        return {"ok": True, "message": "the worker gets it at its next board_read"}
+    def permission_decide(self, permission: int, approve: bool, always: bool = False) -> dict:
+        p = self.board.decide_permission(permission, approve, always, author="human")
+        return {"permission": p["id"], "status": p["status"],
+                "message": "the waiting worker gets the answer at the dispatcher's next tick"}
+
+    @_safe
+    def task_steer(self, task: int, message: str, now: bool = False) -> dict:
+        self.board.steer(task, message, author="human", now=now)
+        return {"ok": True, "message": "delivered to the live session (or at the worker's next board_read)"}
 
     @_safe
     def task_unblock(self, task: int, note: str = "") -> dict:
@@ -532,9 +544,10 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
             return bt.task_complete(summary)
     else:
         @mcp.tool()
-        def feature_create(slug: str, title: str, brief: str = "", contract: str = "") -> dict:
-            """Create a multi-project feature with its brief and the shared contract (APIs, events, schemas)."""
-            return bt.feature_create(slug, title, brief, contract)
+        def feature_create(slug: str, title: str, brief: str = "", contract: str = "",
+                           worker: str | None = None) -> dict:
+            """Create a multi-project feature with its brief and the shared contract (APIs, events, schemas). worker: claude|kiro only to override the user's global tool for this feature."""
+            return bt.feature_create(slug, title, brief, contract, worker)
 
         @mcp.tool()
         def feature_show(slug: str) -> dict:
@@ -553,9 +566,9 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
             return bt.board_read(feature=feature, since_event=since_event)
 
         @mcp.tool()
-        def board_start(feature: str, parallel: int | None = None) -> dict:
-            """Start the feature's tasks: launches separate headless workers (one per task, each in its own project worktree) in the background. After planning, call this instead of doing the tasks yourself."""
-            return bt.board_start(feature, parallel)
+        def board_start(feature: str, parallel: int | None = None, worker: str | None = None) -> dict:
+            """Start the feature's tasks: launches separate headless workers (one per task, each in its own project worktree) in the background. After planning, call this instead of doing the tasks yourself. worker: claude|kiro forces the tool for this run."""
+            return bt.board_start(feature, parallel, worker)
 
         @mcp.tool()
         def board_wait(feature: str, cursor: dict | str | None = None, timeout_sec: float = 300) -> dict:
@@ -563,9 +576,14 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
             return bt.board_wait(feature, cursor, timeout_sec)
 
         @mcp.tool()
-        def task_steer(task: int, message: str) -> dict:
-            """Send the user's guidance to a task's worker while it works (it reads it at its next board_read)."""
-            return bt.task_steer(task, message)
+        def permission_decide(permission: int, approve: bool, always: bool = False) -> dict:
+            """Answer a worker's pending permission request (from board_wait / board_status) with the user's decision. always=true also adds the rule to that project's allow-list."""
+            return bt.permission_decide(permission, approve, always)
+
+        @mcp.tool()
+        def task_steer(task: int, message: str, now: bool = False) -> dict:
+            """Send the user's guidance to a task's worker while it works. Claude gets it inside its current turn; Kiro after its running tool (now=true interrupts the turn instead)."""
+            return bt.task_steer(task, message, now)
 
         @mcp.tool()
         def task_unblock(task: int, note: str = "") -> dict:

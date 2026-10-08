@@ -23,6 +23,8 @@ DEFAULTS = {
     "context": {"max_chars": 16000},
     "board": {"parallel": 3, "max_parallel": 6, "worker_memory_gb": 1.0, "min_free_memory_gb": 2.0,
               "start_stagger_sec": 2.0, "task_budget_usd": None, "feature_budget_usd": None,
+              "task_budget_credits": None, "feature_budget_credits": None,
+              "approval_timeout_min": 30, "stall_min": 10,
               "max_tasks_per_feature": 30, "default_worker": "claude",
               "verify": True, "verify_timeout_sec": 600, "review": True, "review_timeout_min": 15},
     "workers": {
@@ -32,8 +34,8 @@ DEFAULTS = {
             "allowed_tools": ["read", "write", "shell:git status", "shell:git diff", "shell:git log",
                               "shell:git add", "shell:git commit", "mcp:aos", "mcp:graphskill"],
         },
-        "claude": {"model": "sonnet"},
-        "kiro": {"model": None},
+        "claude": {"model": "sonnet", "transport": "acp", "acp_adapter": None},
+        "kiro": {"model": None, "transport": "acp"},
     },
 }
 
@@ -111,6 +113,11 @@ def default_slug(path: str | Path) -> str:
 def check_slug(slug: str, kind: str = "project") -> None:
     if not SLUG_RE.match(slug or ""):
         raise AosError(f"invalid {kind} slug {slug!r}", "lowercase a-z, 0-9 and '-', max 64 chars")
+
+
+def global_worker(cfg: dict | None = None) -> str | None:
+    """The user's agent tool (`aos worker claude|kiro`): per machine, never in the repo."""
+    return (cfg if cfg is not None else load_user_config()).get("worker") or None
 
 
 def graphskill_cmd(cfg: dict | None = None) -> list[str] | None:

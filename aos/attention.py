@@ -40,4 +40,9 @@ def task_attention(board: Board, t: dict, stuck: dict[int, list[int]] | None = N
     if proposals:
         info["proposals"] = proposals
         sig += "|proposals:" + ",".join(str(p["id"]) for p in proposals)
+    asks = [{"id": p["id"], "summary": p["summary"], "role": p["role"]}
+            for p in board.permissions(task=t["id"], status="pending")]
+    if asks:
+        info["permissions"] = asks  # a live worker waits for the user's yes/no
+        sig += "|permissions:" + ",".join(str(p["id"]) for p in asks)
     return sig, info
