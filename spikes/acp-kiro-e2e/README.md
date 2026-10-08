@@ -53,3 +53,7 @@ Everything runs in a throwaway `~/aos-kiro-e2e-*` home that is deleted at the en
 ## Runs
 
 - `REPORT-2026-10-08.md`: first real run, 16/16. `--now` arrived before any permission request was open, and the logs had no ACP messages yet; both are fixed since.
+- `REPORT-2026-10-08-2.md`: rerun on 26c5a7a, 18/18.
+  - `--now` arrived while a permission request was open; the request was refused and Kiro was re-prompted.
+  - An approved command wasn't asked again in the same attempt.
+  - The user's global Kiro MCP server (`sonarqube`) is named in the worker logs, which suggests it loads into worker sessions (not confirmed). Worker sessions aren't isolated from global Kiro MCP servers.
