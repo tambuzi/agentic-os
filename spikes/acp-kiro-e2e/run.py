@@ -98,7 +98,9 @@ class Run:
         (self.demo / "calc.py").write_text("def add(a, b):\n    return a + b\n")
         (self.demo / "test_calc.py").write_text('from calc import add\nassert add(2, 3) == 5\nprint("ok")\n')
         git = lambda *a: subprocess.run(["git", *a], cwd=self.demo, check=True, capture_output=True)
-        git("init", "-q"); git("add", "."); git("commit", "-qm", "init")
+        git("init", "-q")
+        git("config", "core.hooksPath", "/dev/null")  # global pre-commit hooks would block the worker's commits
+        git("add", "."); git("commit", "-qm", "init")
         self.aos("link", str(self.demo), "--name", "demo", "--no-graphskill")
         git("add", "-A"); git("commit", "-qm", "aos link")
         import yaml
