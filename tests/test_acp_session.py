@@ -54,7 +54,7 @@ def test_option_mapping():
     options = [{"optionId": "a1", "kind": "allow_once"}, {"optionId": "a2", "kind": "allow_always"},
                {"optionId": "r1", "kind": "reject_once"}]
     assert tools.option_for("allow", options) == "a1"
-    assert tools.option_for("always", options) == "a2"
+    assert tools.option_for("always", options) == "a1"  # aos keeps the rule; the agent never persists one
     assert tools.option_for("reject", options) == "r1"
 
 
@@ -124,3 +124,38 @@ def test_steering_per_tool(tmp_path, monkeypatch):
             assert any(e["kind"] == "steer" and e["data"] == "use the v2 endpoint" for e in seen(log))
         finally:
             s.close()
+
+
+def test_claude_session_gets_the_configured_model(tmp_path, monkeypatch):
+    s, log = open_session(tmp_path, monkeypatch, "claude")
+    try:
+        s.start(tmp_path, SERVERS, "ctx", model="sonnet")
+        meta = [e for e in seen(log) if e["kind"] == "session/new"][0]["data"]["meta"]
+        assert meta["claudeCode"]["options"]["model"] == "sonnet" and meta["systemPrompt"] == {"append": "ctx"}
+    finally:
+        s.close()
+
+
+def test_claude_steer_never_starts_a_turn_of_its_own(tmp_path):
+    method, params = tools.steer_request("claude", "s1", "hi")
+    assert params["_meta"]["steering"]["idleBehavior"] == "promptRequired"
+
+    class Conn:
+        def request(self, method, params, timeout=None):
+            return {"outcome": "promptRequired", "reason": "noRunningTurn"}
+    s = AcpWorkerSession(Conn(), "claude")
+    s.session_id = "s1"
+    assert s.steer("hi") is None
+
+
+def test_claude_cost_is_a_running_total_not_a_sum(tmp_path):
+    from queue import Queue
+
+    class Conn:
+        events = Queue()
+    s = AcpWorkerSession(Conn(), "claude")
+    for amount in (0.5, 0.8):  # total_cost_usd per SDK result, cumulative for the session
+        Conn.events.put(("notification", "session/update", {"update": {"sessionUpdate": "usage_update",
+                                                                          "cost": {"amount": amount}}}))
+    s.drain()
+    assert s.cost == pytest.approx(0.8)

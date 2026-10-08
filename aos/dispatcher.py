@@ -179,6 +179,8 @@ class Dispatcher:
     def recover(self) -> None:
         """Tasks left `running` by a previous dispatcher: stop the old worker only if it is
         provably ours (same pid *and* start time), then count a failed attempt."""
+        for p in self.board.permissions(status="pending"):
+            self.board.expire_permission(p["id"], "the dispatcher restarted")
         for t in self.board.tasks(status="running"):
             pid = t["pid"]
             if pid and t.get("proc_start") and process_start(pid) == t["proc_start"]:
@@ -325,8 +327,8 @@ class Dispatcher:
                 continue
             try:
                 r.acp.session.drain(on_request=lambda rid, m, p, tid=tid, r=r: self._on_agent_request(tid, r, rid, m, p))
-                if r.kind == "worker":  # steers are the user's words for the worker, never its reviewer
-                    self._deliver_steers(tid, r)
+                if r.kind == "worker" and self._still_owns(r, self.board.task(tid)):
+                    self._deliver_steers(tid, r)  # the user's words for the worker, never its reviewer
                 self._service_turn(tid, r)
             except TASK_ERRORS as e:
                 _warn(f"task #{tid}: {e}")
@@ -344,6 +346,19 @@ class Dispatcher:
                 text, acp.reprompt = acp.reprompt, None
                 acp.session.prompt(text)
                 return
+            stop, error = acp.session.turn_outcome()
+            if error:
+                acp.end_reason = f"turn failed: {error}"
+                acp.close()
+                return
+            if stop == "refusal":
+                if acp.tool == "kiro" and not acp.refusal_retried:  # Kiro can refuse right after a cancel
+                    acp.refusal_retried = True
+                    acp.session.prompt(acp.session.last_prompt)
+                    return
+                acp.end_reason = "the model refused the turn (stopReason: refusal)"
+                acp.close()
+                return
             if self._still_owns(r, self.board.task(tid)) and not acp.nudged:
                 acp.nudged = True  # one reminder in the same session before the attempt counts as failed
                 acp.session.prompt(self.NUDGES[r.kind])
@@ -354,14 +369,27 @@ class Dispatcher:
         stall_s = 60 * float(self.aos.settings["board"].get("stall_min", 10))
         if not waiting and acp.reprompt is None and time.monotonic() - acp.conn.last_activity > stall_s:
             acp.stalled = True
-            acp.session.cancel()
+            self._cancel_turn(r, "the worker stalled")
             acp.close()
+
+    def _cancel_turn(self, r: Running, why: str) -> None:
+        """session/cancel, answering the run's open permission requests `cancelled` first
+        (ACP requires it; otherwise the turn never ends)."""
+        for pid, entry in list(self.pending_perms.items()):
+            if entry[1] is r:
+                del self.pending_perms[pid]
+                try:
+                    r.acp.conn.respond(entry[2], {"outcome": {"outcome": "cancelled"}})
+                except Exception as e:
+                    _warn(f"permission answer not delivered: {e}")
+                self.board.expire_permission(pid, why)
+        r.acp.session.cancel()
 
     def _deliver_steers(self, tid: int, r: Running) -> None:
         for m in self.board.steer_messages(tid, since=r.steer_since):
             r.steer_since = m["id"]
             if m["now"] and r.acp.tool == "kiro":
-                r.acp.session.cancel()
+                self._cancel_turn(r, "the user changed the plan")
                 r.acp.reprompt = f"Change of plan from the user: {m['message']}"
                 self.board.log_event(tid, "steer_delivered", f"turn cancelled; next prompt: {m['message']}")
                 continue
@@ -413,7 +441,7 @@ class Dispatcher:
                         aos = AOS(self.aos.repo, home=self.aos.home, data=self.aos.data)
                         add_allowed_tool(aos, r.project, rule)
                         r.allowed = [*(r.allowed or []), rule]
-                    self._answer_permission(r, req_id, options, "always" if p["always"] else "allow")
+                    self._answer_permission(r, req_id, options, "allow")  # never the agent's own "always"
                 elif p["status"] in ("denied", "expired"):
                     self._answer_permission(r, req_id, options, "reject")
                 elif time.monotonic() - asked > timeout:
@@ -496,6 +524,13 @@ class Dispatcher:
         _kill_group(r.proc.pid, wait=1.0, proc=r.proc)
         if r.acp:
             r.acp.close()
+            if r.acp.session:  # cost still queued when it closed; requests get no answer (it's gone)
+                r.acp.session.drain(on_request=lambda *_: None)
+            for pid, entry in list(self.pending_perms.items()):
+                if entry[1] is r:
+                    del self.pending_perms[pid]
+            for p in self.board.permissions(task=tid, status="pending"):
+                self.board.expire_permission(p["id"], "the worker is gone")
         r.launch.cleanup()
         if r.log:
             r.log.close()
@@ -508,6 +543,7 @@ class Dispatcher:
         if r.kind == "reviewer":
             why = (f"timed out after {r.timeout_min:g} min" if r.timed_out
                    else f"stalled: no activity for {stall_min:g} min" if r.acp and r.acp.stalled
+                   else r.acp.end_reason if r.acp and r.acp.end_reason
                    else f"exited with code {code}" if code else "exited without a verdict")
             self.board.review_unfinished(tid, why)
             return
@@ -515,6 +551,8 @@ class Dispatcher:
             why = f"timed out after {r.timeout_min:g} min"
         elif r.acp and r.acp.stalled:
             why = f"stalled: no activity for {stall_min:g} min"
+        elif r.acp and r.acp.end_reason:
+            why = r.acp.end_reason
         elif r.acp and r.acp.nudged:
             why = "ended its turn without task_complete, even after a nudge"
         elif code in r.exit_reasons:  # the tool says it never got going (e.g. MCP startup)

@@ -173,3 +173,90 @@ def test_worker_steer_is_not_replayed_to_the_reviewer(env, monkeypatch):
             {"kind": "steer", "data": "use the v2 endpoint"}]
     finally:
         stop(d)
+
+
+def pending_perms(b):
+    return b.permissions(status="pending")
+
+
+def test_permissions_expire_when_the_run_ends(env, monkeypatch):
+    repo, b, write, tmp_path = env
+    write("claude")
+    monkeypatch.setenv("FAKE_ACP_MODE", "permission")
+    t = b.add_task("checkout", "api", "a", worker="claude")
+    d = Dispatcher(repo, tick=0.05)
+    assert wait_for(lambda: pending_perms(b), d)
+    stop(d)  # terminate + reap, as at the end of --once or a Ctrl-C
+    assert pending_perms(b) == []
+
+
+def test_recover_expires_permissions_of_abandoned_runs(env):
+    repo, b, write, tmp_path = env
+    write("claude")
+    t = b.add_task("checkout", "api", "a", worker="claude")
+    b.promote()
+    b.claim(t)
+    b.request_permission(t, "run `npm publish`")
+    Dispatcher(repo, tick=0.05).recover()
+    assert pending_perms(b) == []
+
+
+def test_steer_now_answers_the_open_permission_as_cancelled(env, monkeypatch):
+    repo, b, write, tmp_path = env
+    write("kiro", extra={"agents_dir": str(tmp_path / "agents")})
+    monkeypatch.setenv("FAKE_ACP_TOOL", "kiro")
+    monkeypatch.setenv("FAKE_ACP_MODE", "permission")
+    t = b.add_task("checkout", "api", "a", worker="kiro")
+    d = Dispatcher(repo, tick=0.05)
+    try:
+        assert wait_for(lambda: pending_perms(b), d)
+        assert main(["task", "steer", str(t), "stop and use v2", "--now"]) == 0
+        assert wait_for(lambda: any(e["kind"] == "permission_outcome" for e in agent_events(tmp_path)), d)
+        assert [e["data"] for e in agent_events(tmp_path) if e["kind"] == "permission_outcome"] == ["cancelled"]
+        assert pending_perms(b) == []
+        assert wait_for(lambda: "stop and use v2" in [e for e in agent_events(tmp_path) if e["kind"] == "prompt"][-1]["data"], d)
+    finally:
+        stop(d)
+
+
+def test_cost_still_queued_at_close_is_recorded(env, monkeypatch):
+    repo, b, write, tmp_path = env
+    write("claude")
+    monkeypatch.setenv("FAKE_ACP_MODE", "silent")
+    t = b.add_task("checkout", "api", "a", worker="claude")
+    d = Dispatcher(repo, tick=0.05)
+    assert wait_for(lambda: any(e["kind"] == "prompt" for e in agent_events(tmp_path)), d)
+    d.running[t].acp.conn.events.put(("notification", "session/update",
+                                      {"update": {"sessionUpdate": "usage_update", "cost": {"amount": 2.0}}}))
+    stop(d)
+    assert b.task_cost(t) == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize("tool,prompts", [("claude", 1), ("kiro", 2)])
+def test_refusal_fails_with_the_real_reason_and_no_nudge(env, monkeypatch, tool, prompts):
+    repo, b, write, tmp_path = env
+    write(tool, board_cfg={"max_attempts": 1}, extra={"agents_dir": str(tmp_path / "agents")})
+    monkeypatch.setenv("FAKE_ACP_TOOL", tool)
+    monkeypatch.setenv("FAKE_ACP_MODE", "refuse")
+    t = b.add_task("checkout", "api", "a", worker=tool, max_attempts=1)
+    d = Dispatcher(repo, tick=0.05)
+    try:
+        assert wait_for(lambda: b.task(t)["status"] == "failed", d)
+        assert any("refusal" in e["body"] for e in b.events("checkout") if e["task"] == t)
+        assert len([e for e in agent_events(tmp_path) if e["kind"] == "prompt"]) == prompts  # kiro retries once
+    finally:
+        stop(d)
+
+
+def test_a_failed_turn_fails_with_the_agent_error(env, monkeypatch):
+    repo, b, write, tmp_path = env
+    write("claude")
+    monkeypatch.setenv("FAKE_ACP_MODE", "error")
+    t = b.add_task("checkout", "api", "a", worker="claude", max_attempts=1)
+    d = Dispatcher(repo, tick=0.05)
+    try:
+        assert wait_for(lambda: b.task(t)["status"] == "failed", d)
+        assert any("API overloaded" in e["body"] for e in b.events("checkout") if e["task"] == t)
+        assert len([e for e in agent_events(tmp_path) if e["kind"] == "prompt"]) == 1
+    finally:
+        stop(d)

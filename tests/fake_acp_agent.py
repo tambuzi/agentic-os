@@ -11,6 +11,8 @@ Behaviour comes from the environment:
       silent       never answer the prompt and send nothing (stall)
       no_verdict   end the turn without touching the board (twice -> nudge then failure)
       slow         stream an update every 0.2 s for FAKE_ACP_SLOW seconds, then complete
+      refuse       end every turn with stopReason refusal
+      error        answer every prompt with a JSON-RPC error
   FAKE_ACP_COST   cost to report per turn (USD for claude, credits for kiro)
   FAKE_ACP_LOG    file where the agent appends what it saw (steers, permission outcomes, loads)
 The board task and generation are read from the aos MCP server args given in session/new.
@@ -118,6 +120,10 @@ def run_prompt(rid, sid, text):
         else:
             complete_task("finished after the nudge")
         finish_turn(rid, sid)
+    elif m == "refuse":  # the model refuses every prompt
+        finish_turn(rid, sid, "refusal")
+    elif m == "error":  # the turn fails with a JSON-RPC error
+        send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32603, "message": "Internal error: API overloaded"}})
     elif m == "no_verdict":
         update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "I think I'm done"}})
         finish_turn(rid, sid)

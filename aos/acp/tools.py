@@ -95,12 +95,14 @@ def steer_request(tool: str, session_id: str, text: str) -> tuple[str, dict]:
     if tool == "kiro":
         return "_session/steer", {"sessionId": session_id, "message": text}
     return "_session/steering", {"sessionId": session_id, "prompt": [{"type": "text", "text": text}],
-                                 "_meta": {"steering": {"priority": "now"}}}
+                                 "_meta": {"steering": {"priority": "now", "idleBehavior": "promptRequired"}}}
 
 
 def option_for(decision: str, options: list[dict]) -> str | None:
     """The optionId for allow / always / reject among an agent's permission options."""
-    wanted = {"allow": ("allow_once",), "always": ("allow_always", "allow_once"),
+    # "always" is still allow_once: aos records the rule itself; an agent's allow_always would
+    # persist the agent's own rule (Claude: .claude/settings.local.json) and bypass aos's checks
+    wanted = {"allow": ("allow_once",), "always": ("allow_once",),
               "reject": ("reject_once", "reject_always")}[decision]
     for kind in wanted:
         for o in options:

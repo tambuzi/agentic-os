@@ -29,6 +29,9 @@ class AcpRun:
         self.nudged = False
         self.stalled = False
         self.reprompt: str | None = None  # Kiro steer --now: the next prompt once the turn has ended
+        self.end_reason: str | None = None  # why the session ended other than by a verdict (refusal, error)
+        self.refusal_retried = False
+        self._timed_turn = None
 
     @property
     def proc(self):
@@ -41,7 +44,7 @@ class AcpRun:
         self.session = AcpWorkerSession(self.conn, self.tool)
         try:
             self.session.start(spec.worktree, spec.mcp_servers, read_text(spec.context_file),
-                               resume_id=resume_id, kiro_agent=kiro_agent)
+                               resume_id=resume_id, kiro_agent=kiro_agent, model=getattr(spec, "model", None))
             self.session.prompt(spec.prompt)
         except Exception:
             self.close()
@@ -51,6 +54,8 @@ class AcpRun:
         """The current turn has ended (and, for Kiro, its trailing metadata has arrived or
         a few seconds passed, so its credit cost isn't lost)."""
         turn = self.session.turn if self.session else None
+        if turn is not self._timed_turn:  # a new prompt: its own wait for the trailing metadata
+            self._timed_turn, self.turn_done_at = turn, None
         if turn is None or not turn.done():
             self.turn_done_at = None
             return False

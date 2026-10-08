@@ -31,12 +31,19 @@ def _tool_name(call: dict) -> str:
     return str(meta.get("toolName") or call.get("title") or "")
 
 
-def _command(call: dict) -> str | None:
+def _raw_command(call: dict) -> str | None:
     raw = call.get("rawInput") or {}
     cmd = raw.get("command") or raw.get("cmd")
     if isinstance(cmd, list):
         cmd = " ".join(str(c) for c in cmd)
-    return " ".join(str(cmd).split()) if cmd else None
+    return str(cmd) if cmd else None
+
+
+def _command(call: dict) -> str | None:
+    """The command with whitespace normalised, for prefix matching only (never for the
+    chaining check: a newline is a second command)."""
+    cmd = _raw_command(call)
+    return " ".join(cmd.split()) if cmd else None
 
 
 def _paths(call: dict) -> list[str]:
@@ -49,6 +56,8 @@ def _paths(call: dict) -> list[str]:
 
 
 def _inside(path: str, worktree: Path) -> bool:
+    if path.startswith("~") or "$" in path:  # the agent's shell/tool may expand these: treat as outside
+        return False
     root = Path(worktree).resolve()
     p = Path(path)
     p = (root / p if not p.is_absolute() else p).resolve()
@@ -82,7 +91,7 @@ def decide(call: dict, allowed: list[str], worktree: str | Path) -> Decision:
             return Decision("reject", f"run `{cmd}` (never allowed for board workers)")
         head = " ".join(cmd.split()[:2])
         rule = f"shell:{head}" if head else None
-        if _CHAINING.search(cmd):
+        if _CHAINING.search(_raw_command(call) or cmd):
             return Decision("ask", f"run `{cmd}` (chained or redirected command)", rule)
         for entry in allowed:
             if entry.startswith("shell:"):

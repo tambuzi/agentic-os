@@ -85,7 +85,7 @@ def test_always_adds_the_rule_to_the_project(env, capsys):
     try:
         assert wait_for(lambda: pending(b), d)
         assert main(["task", "approve", str(pending(b)[0]["id"]), "--always"]) == 0
-        assert wait_for(lambda: outcome(tmp_path) is not None, d) and outcome(tmp_path) == "always"
+        assert wait_for(lambda: outcome(tmp_path) is not None, d) and outcome(tmp_path) == "allow"  # never the agent's own allow_always
         projects = yaml.safe_load((b.data / "projects.yaml").read_text())
         assert "shell:npm publish" in projects["projects"]["api"]["worker"]["allowed_tools"]
     finally:

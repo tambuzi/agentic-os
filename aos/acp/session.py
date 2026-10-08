@@ -25,12 +25,13 @@ class AcpWorkerSession:
         self.hermetic = True
         self.resumed = False
         self.turn: Pending | None = None
+        self.last_prompt: str | None = None
         self._context_prefix: str | None = None
         self._turn_end = threading.Event()
 
     # -- setup -------------------------------------------------------------------
     def start(self, cwd: str | Path, mcp_servers: dict, context: str, resume_id: str | None = None,
-              kiro_agent: str | None = None, timeout: float = 120) -> str:
+              kiro_agent: str | None = None, timeout: float = 120, model: str | None = None) -> str:
         init = self.conn.request("initialize", {"protocolVersion": 1, "clientCapabilities": CLIENT_CAPABILITIES},
                                  timeout=timeout)
         self.capabilities = (init or {}).get("agentCapabilities") or {}
@@ -40,6 +41,8 @@ class AcpWorkerSession:
             for name, s in mcp_servers.items()]}
         if self.facts["context"] == "system_prompt":
             params["_meta"] = {"systemPrompt": {"append": context}}
+            if model:
+                params["_meta"]["claudeCode"] = {"options": {"model": model}}
         result = None
         if resume_id and self.capabilities.get("loadSession"):
             try:
@@ -64,12 +67,15 @@ class AcpWorkerSession:
         if self._context_prefix:
             text, self._context_prefix = f"{self._context_prefix}\n\n{text}", None
         self._turn_end.clear()
+        self.last_prompt = text
         self.turn = self.conn.request_async("session/prompt", {"sessionId": self.session_id,
                                                                "prompt": [{"type": "text", "text": text}]})
         return self.turn
 
     def steer(self, text: str) -> str | None:
-        """'injected' (Claude, mid-turn), 'queued' (Kiro, after the running tool) or None."""
+        """'injected' (Claude, mid-turn), 'queued' (Kiro, after the running tool) or None
+        (not delivered; with no turn running, Claude answers promptRequired instead of
+        starting a turn of its own)."""
         method, params = tools.steer_request(self.tool, self.session_id, text)
         try:
             result = self.conn.request(method, params, timeout=30) or {}
@@ -77,7 +83,15 @@ class AcpWorkerSession:
             return None
         if result.get("queued"):
             return "queued"
-        return result.get("outcome") or "delivered"
+        outcome = result.get("outcome") or "delivered"
+        return None if outcome == "promptRequired" else outcome
+
+    def turn_outcome(self) -> tuple[str | None, str | None]:
+        """(stopReason, error message) of the finished turn."""
+        try:
+            return (self.turn.result() or {}).get("stopReason"), None
+        except AcpError as e:
+            return None, e.message
 
     def cancel(self) -> None:
         try:
@@ -117,8 +131,8 @@ class AcpWorkerSession:
             _, method, params = item
             if method == "session/update":
                 cost = ((params.get("update") or {}).get("cost") or {}).get("amount")
-                if isinstance(cost, (int, float)):
-                    self.cost += float(cost)
+                if isinstance(cost, (int, float)):  # Claude: total_cost_usd, a running total for the session
+                    self.cost = max(self.cost, float(cost))
             elif method == self.facts["turn_end"]:
                 for m in params.get("meteringUsage") or []:
                     if isinstance(m.get("value"), (int, float)):
