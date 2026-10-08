@@ -20,7 +20,7 @@ import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
 
@@ -59,6 +59,7 @@ class Running:
     log_path: Path | None = None      # the run's output, read for its cost when it exits
     acp: AcpRun | None = None         # live ACP session (None = one-shot CLI process)
     steer_since: int = 0              # last steer event already delivered to the live session
+    approved: set = field(default_factory=set)  # what the user allowed during this attempt (exact summaries)
     allowed: list | None = None       # neutral allow-list, for ACP permission requests
     worktree: Path | None = None
     generation: int = 0               # the attempt token it was launched with
@@ -408,6 +409,8 @@ class Dispatcher:
             return
         verdict = decide(params.get("toolCall") or {}, r.allowed or [], r.worktree or Path("."))
         options = params.get("options") or []
+        if verdict.decision == "ask" and verdict.summary in r.approved:
+            verdict.decision = "allow"  # the user already allowed exactly this during this attempt
         if verdict.decision == "ask":  # the user decides; the worker waits (not a stall)
             pid = self.board.request_permission(tid, verdict.summary, json.dumps(params.get("toolCall") or {})[:4000],
                                                 verdict.rule, generation=r.generation, role=r.kind)
@@ -437,6 +440,7 @@ class Dispatcher:
                     self.board.expire_permission(pid, "the worker is gone")
                 elif p["status"] == "approved":
                     r.acp.conn.last_activity = time.monotonic()  # the wait for the user isn't silence
+                    r.approved.add(p["summary"])
                     if p["always"] and rule:
                         aos = AOS(self.aos.repo, home=self.aos.home, data=self.aos.data)
                         add_allowed_tool(aos, r.project, rule)

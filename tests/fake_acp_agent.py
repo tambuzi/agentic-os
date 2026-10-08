@@ -137,9 +137,10 @@ def run_prompt(rid, sid, text):
             return
         complete_task()
         finish_turn(rid, sid)
-    elif m == "permission":
-        answer = ask_permission(sid)
-        note("permission_outcome", answer)
+    elif m == "permission":  # FAKE_ACP_ASKS: how many times it asks for the same command
+        for _ in range(int(os.environ.get("FAKE_ACP_ASKS", "1"))):
+            answer = ask_permission(sid)
+            note("permission_outcome", answer)
         complete_task(f"permission answer: {answer}")
         finish_turn(rid, sid)
     elif m in ("review_pass", "review_fail"):

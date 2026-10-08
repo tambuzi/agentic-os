@@ -84,7 +84,7 @@ class Run:
             cfg = yaml.safe_load((self.repo / "aos.yaml").read_text())
             cfg["workers"]["kiro"]["acp_command"] = [sys.executable, str(REPO / "tests" / "fake_acp_agent.py")]
             (self.repo / "aos.yaml").write_text(yaml.safe_dump(cfg))
-            self.env.update({"FAKE_ACP_TOOL": "kiro", "FAKE_ACP_MODE_1": "permission", "FAKE_ACP_MODE_2": "slow",
+            self.env.update({"FAKE_ACP_TOOL": "kiro", "FAKE_ACP_MODE_1": "permission", "FAKE_ACP_MODE_2": "permission",
                              "FAKE_ACP_SLOW": "25", "FAKE_ACP_LOG": str(self.root / "fake-agent.events")})
         elif not shutil.which("kiro-cli"):
             raise SystemExit("kiro-cli not on PATH (or use --fake for a rehearsal)")
@@ -124,6 +124,7 @@ class Run:
         self.note(f"dispatcher started (pid {disp.pid})")
         b = self.board()
         steered1 = steered2 = False
+        self.now_met_permission = None  # the id of the permission open when --now went in
         running2_since = None
         deadline = time.monotonic() + 60 * self.args.timeout
         try:
@@ -142,8 +143,11 @@ class Run:
                 t2 = tasks.get(2)
                 if t2 and t2["status"] == "running" and not steered2:
                     running2_since = running2_since or time.monotonic()
-                    if time.monotonic() - running2_since > 8:
-                        self.note("#2 is working; steer --now")
+                    open2 = [p for p in b.permissions(task=2, status="pending")]
+                    if open2 or time.monotonic() - running2_since > 90:
+                        self.now_met_permission = open2[0]["id"] if open2 else None
+                        waits = f" and waits on permission #{self.now_met_permission}" if open2 else ""
+                        self.note(f"#2 is working{waits}; steer --now")
                         self.aos("task", "steer", "2", STEER2, "--now")
                         steered2 = True
                 if all(t["status"] in ("done", "failed", "blocked", "cancelled") for t in tasks.values()) and tasks:
@@ -176,6 +180,10 @@ class Run:
             self.check(t.get("transport") == "acp", f"task {tid} ran over ACP (transport {t.get('transport')})")
         self.check(ev(1, "steer_queued"), "task 1: steer recorded as steer_queued")
         self.check(any("turn cancelled" in e["body"] for e in ev(2, "steer_delivered")), "task 2: --now cancelled the turn")
+        self.check(self.now_met_permission is not None, "task 2: --now went in while a permission request was open")
+        if self.now_met_permission is not None:
+            p = b.permission(self.now_met_permission)
+            self.check(p["status"] == "expired", f"task 2: that permission was answered cancelled (is {p['status']})")
         self.check(not any("ACP unavailable" in e["body"] for e in events), "no fallback to the CLI")
         self.check(not b.permissions(status="pending"), "no permission left pending")
         costs = b._rows("SELECT task, role, usd, unit FROM costs ORDER BY id", ())
@@ -200,7 +208,12 @@ class Run:
         self.out["calc.py"] = calc
         logs = sorted((self.home / "data" / "logs").glob("*.log"))
         self.out["worker logs (tails)"] = "\n\n".join(
-            f"--- {p.name}\n" + "\n".join(p.read_text(errors="replace").splitlines()[-25:]) for p in logs)
+            f"--- {p.name}\n" + "\n".join(l[:300] for l in p.read_text(errors="replace").splitlines()[-25:])
+            for p in logs)
+        names = [n for n in self._mcp_names(Path.home() / ".kiro" / "settings" / "mcp.json").split(", ") if n and "(" not in n]
+        text = "\n".join(p.read_text(errors="replace") for p in logs)
+        self.out["global Kiro MCP servers mentioned in worker logs"] = "\n".join(
+            f"{n}: {'yes' if n in text else 'no'}" for n in names) or "(no global servers)"
         self.out["dispatcher log (tail)"] = "\n".join(
             (self.root / "dispatcher.log").read_text(errors="replace").splitlines()[-40:])
         kiro_mcp = Path.home() / ".kiro" / "settings" / "mcp.json"

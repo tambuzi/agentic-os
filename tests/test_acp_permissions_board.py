@@ -133,3 +133,19 @@ def test_kiro_watch_reports_a_pending_permission(env, capsys, monkeypatch):
     finally:
         for r in list(d.running.values()):
             d._terminate(r)
+
+
+def test_an_approved_command_is_not_asked_again_in_the_same_attempt(env, monkeypatch):
+    repo, b, t, tmp_path = env
+    monkeypatch.setenv("FAKE_ACP_ASKS", "2")
+    d = Dispatcher(repo, tick=0.05)
+    try:
+        assert wait_for(lambda: pending(b), d)
+        assert main(["task", "approve", str(pending(b)[0]["id"])]) == 0
+        assert wait_for(lambda: b.task(t)["status"] == "done", d)
+        events = [json.loads(l) for l in (tmp_path / "agent.events").read_text().splitlines()]
+        assert [e["data"] for e in events if e["kind"] == "permission_outcome"] == ["allow", "allow"]
+        assert len(b.permissions(task=t)) == 1
+    finally:
+        for r in list(d.running.values()):
+            d._terminate(r)

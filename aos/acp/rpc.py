@@ -65,6 +65,7 @@ class AcpConnection:
         self._next_id = 0
         self._lock = threading.Lock()
         self._write_lock = threading.Lock()
+        self._log_lock = threading.Lock()
         self._closed = False
         threading.Thread(target=self._read, name="acp-reader", daemon=True).start()
 
@@ -73,8 +74,23 @@ class AcpConnection:
         return self.proc.pid
 
     # -- wire --------------------------------------------------------------------
+    def _trace(self, direction: str, line: str) -> None:
+        """Protocol traffic in the run's log, next to the agent's stderr ("> " sent, "< " received)."""
+        if not self._log:
+            return
+        line = line.rstrip("\n")
+        if len(line) > 2000:
+            line = line[:2000] + f"... ({len(line)} chars)"
+        with self._log_lock:
+            try:
+                self._log.write(f"{direction} {line}\n".encode("utf-8", errors="replace"))
+                self._log.flush()
+            except (OSError, ValueError):
+                pass
+
     def _write(self, msg: dict) -> None:
         data = (json.dumps(msg) + "\n").encode("utf-8")
+        self._trace(">", data.decode("utf-8"))
         with self._write_lock:
             try:
                 self.proc.stdin.write(data)
@@ -84,6 +100,7 @@ class AcpConnection:
 
     def _read(self) -> None:
         for raw in self.proc.stdout:
+            self._trace("<", raw.decode("utf-8", errors="replace"))
             try:
                 msg = json.loads(raw.decode("utf-8", errors="replace"))
             except json.JSONDecodeError:

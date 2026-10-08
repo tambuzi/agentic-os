@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,9 @@ _CHAINING = re.compile(r"[;&|`$()<>\\\r\n]")
 _DANGEROUS = (re.compile(r"(^|\s)git\s+push(\s|$)"), re.compile(r"(^|\s)sudo(\s|$)"),
               re.compile(r"rm\s+-[a-z]*r[a-z]*f?[a-z]*\s+/(\s|$)"), re.compile(r"rm\s+-[a-z]*f[a-z]*r[a-z]*\s+/(\s|$)"))
 _HARMLESS_KINDS = ("think", "switch_mode", "plan")
+_SEPARATORS = (";", "&&", "||", "|")
+_NOT_A_PLAIN_CHAIN = re.compile(r"[\r\n`<>()\\]|\$(?!\?)")  # newlines, substitution, redirects, $VAR ($? is fine)
+_HARMLESS_COMMANDS = ("echo", "true")
 
 
 @dataclass
@@ -64,6 +68,41 @@ def _inside(path: str, worktree: Path) -> bool:
     return p == root or root in p.parents
 
 
+def _segments(cmd: str) -> list[str] | None:
+    """The commands of a plain chain (a; b && c || d | e), or None for anything else."""
+    if _NOT_A_PLAIN_CHAIN.search(cmd):
+        return None
+    lexer = shlex.shlex(cmd, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:  # unbalanced quotes
+        return None
+    segments, current = [], []
+    for tok in tokens:
+        if tok and set(tok) <= set(";&|"):
+            if tok not in _SEPARATORS or not current:
+                return None  # `&` (background), `;;`, a leading or doubled operator
+            segments.append(" ".join(current))
+            current = []
+        else:
+            current.append(tok)
+    if not current:
+        return None
+    return [*segments, " ".join(current)]
+
+
+def _allowed_command(cmd: str, allowed: list[str]) -> bool:
+    if cmd.split()[0] in _HARMLESS_COMMANDS:
+        return True
+    for entry in allowed:
+        if entry.startswith("shell:"):
+            prefix = entry[6:]
+            if cmd == prefix or cmd.startswith(prefix + " "):
+                return True
+    return False
+
+
 def _mcp_server(name: str) -> tuple[str, str] | None:
     m = re.match(r"^mcp__([A-Za-z0-9_-]+?)__(.+)$", name)
     if m:
@@ -91,13 +130,14 @@ def decide(call: dict, allowed: list[str], worktree: str | Path) -> Decision:
             return Decision("reject", f"run `{cmd}` (never allowed for board workers)")
         head = " ".join(cmd.split()[:2])
         rule = f"shell:{head}" if head else None
-        if _CHAINING.search(_raw_command(call) or cmd):
+        raw = _raw_command(call) or cmd
+        if _CHAINING.search(raw):
+            segments = _segments(raw)  # a plain chain of allowed commands is fine
+            if segments and all(_allowed_command(s, allowed) for s in segments):
+                return Decision("allow", f"run `{cmd}`")
             return Decision("ask", f"run `{cmd}` (chained or redirected command)", rule)
-        for entry in allowed:
-            if entry.startswith("shell:"):
-                prefix = entry[6:]
-                if cmd == prefix or cmd.startswith(prefix + " "):
-                    return Decision("allow", f"run `{cmd}`")
+        if _allowed_command(cmd, allowed):
+            return Decision("allow", f"run `{cmd}`")
         return Decision("ask", f"run `{cmd}`", rule)
 
     paths = _paths(call)

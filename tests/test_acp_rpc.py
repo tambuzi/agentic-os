@@ -71,3 +71,12 @@ def test_rpc_module_never_touches_the_board():
     imported = {n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
     imported |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     assert not {"sqlite3", "board", "..board", "aos.board"} & imported
+
+
+def test_protocol_traffic_goes_to_the_log(conn, tmp_path):
+    # kiro-cli acp writes nothing to stderr: without the traffic a worker's log is empty
+    conn.request("initialize", {"protocolVersion": 1})
+    conn.close()
+    lines = (tmp_path / "agent.log").read_text().splitlines()
+    assert any(l.startswith("> ") and '"initialize"' in l for l in lines)
+    assert any(l.startswith("< ") and "protocolVersion" in l for l in lines)

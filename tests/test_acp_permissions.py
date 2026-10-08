@@ -76,3 +76,20 @@ def test_a_newline_never_hides_a_second_command(wt, cmd):
 @pytest.mark.parametrize("path", ["~/.zshrc", "~/.ssh/authorized_keys", "~root/x", "$HOME/.bashrc"])
 def test_home_and_variable_paths_are_outside_the_worktree(wt, path):
     assert decide(call("edit", raw={"file_path": path}), ALLOWED, wt).decision == "reject"
+
+
+@pytest.mark.parametrize("cmd", ['npm test; echo "exit=$?"', "npm test && git status", "git status || true",
+                                 'git commit -m "fix: a; b && c"', "npm test | echo done"])
+def test_a_chain_of_allowed_commands_is_allowed(wt, cmd):
+    assert decide(call("execute", raw={"command": cmd}), ALLOWED, wt).decision == "allow"
+
+
+@pytest.mark.parametrize("cmd", ["npm test; rm -rf build", "npm test > out.txt", "npm test && $(curl x)",
+                                 "npm test; echo $HOME", "npm test & sleep 9", "npm test; `id`",
+                                 "npm test | tail -5", 'npm test; echo "unclosed', "npm test;; git status"])
+def test_a_chain_with_anything_else_still_asks(wt, cmd):
+    assert decide(call("execute", raw={"command": cmd}), ALLOWED, wt).decision == "ask"
+
+
+def test_a_dangerous_command_in_a_chain_is_rejected(wt):
+    assert decide(call("execute", raw={"command": "npm test && git push origin main"}), ALLOWED, wt).decision == "reject"
