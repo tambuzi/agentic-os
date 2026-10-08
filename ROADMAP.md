@@ -71,7 +71,7 @@ Replace one-shot `claude -p` / `kiro-cli chat --no-interactive` runs with **live
 - [x] Session runner in the dispatcher: permissions on the board, stall detection, one nudge, steering, resume, cost per unit; CLI fallback when ACP isn't available (spec `docs/superpowers/specs/2026-10-07-acp-workers-design.md`).
 - [x] `claude` and `kiro` run over ACP by default; the CLI transport and the `command` adapter stay.
 - [x] Global per-machine tool setting: `aos worker claude|kiro`.
-- [ ] Real Kiro run of the full scenario on a Kiro machine (the probe already verified the protocol).
+- [x] Real Kiro run of the full scenario (kiro-cli 2.23.0, 16/16: `spikes/acp-kiro-e2e/REPORT-2026-10-08.md`).
 
 ## 3. Learning loop
 
