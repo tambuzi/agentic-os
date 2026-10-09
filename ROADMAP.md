@@ -73,15 +73,56 @@ Replace one-shot `claude -p` / `kiro-cli chat --no-interactive` runs with **live
 - [x] Global per-machine tool setting: `aos worker claude|kiro`.
 - [x] Real Kiro run of the full scenario (kiro-cli 2.23.0, 16/16: `spikes/acp-kiro-e2e/REPORT-2026-10-08.md`).
 
-## 3. Learning loop
+## 3. Learning loop (spec first)
 
-- [ ] When a session ends (Claude `Stop`/`SessionEnd`, Kiro `AgentStop`), run a background review of the session that **proposes** memory and skill changes into the inbox, for the user to approve.
-- First decide how far to rely on Kiro Crew for this instead of building it.
+Lessons as small, scored facts that the team approves, learned first from the board. Several ideas come from [ECC](https://github.com/affaan-m/ECC)'s instincts (`skills/continuous-learning-v2`); we build our own version and don't integrate ECC.
 
-## 4. Recall and hygiene
+- [ ] **Lesson model:**
+  - one trigger and one action, a `confidence` (0.3–0.9), a domain, `evidence` (event ids) and a scope (`project` or `org`);
+  - confidence rises when a lesson is confirmed, drops when the user corrects it, and fades when unused.
+- [ ] **Learn from the board first.** It already records explicit corrections:
+  - `review_fail` findings;
+  - failed verifies;
+  - retries with the same cause;
+  - user steers;
+  - denied permissions and approvals with `--always`;
+  - `task_block` reasons.
+
+  A cheap background pass turns repeated patterns into lesson candidates in the **inbox**, and the user approves them as today. Session hooks (Claude `Stop`/`PreCompact`, Kiro `agentStop`) are a later source; their payloads are scrubbed of secrets and size-capped.
+- [ ] **Promotion across projects.** The same lesson approved in 2 or more projects with high confidence is proposed as an org memory. This is the shared-context goal.
+- [ ] **Ranked context.** `aos context` already has a size cap. Add ranking: confidence plus relevance to the project and its stack, a maximum number of lessons, and a minimum confidence. The most useful lessons survive the cap, not the oldest.
+- [ ] **Memory trust.**
+  - Memories record their source (`human`, `board`, `session`) and can be `superseded_by` a newer one instead of edited in place.
+  - Recalled memory is evidence to check, not an instruction.
+  - A `handoff` kind passes a feature between Claude Code and Kiro: objective, state, open questions, next action.
+
+## 4. Recall and skill health
 
 - [ ] Session search: full-text search over past Claude Code (and Kiro) sessions, through a `session_search` tool.
-- [ ] Skill curator: retire skills nobody uses (active → stale → archived), and optionally merge near-duplicates.
+- [ ] **Skill runs and health** (ECC `skill-evolution`):
+  - record each `aos-*` skill run and its outcome;
+  - success rate over 7 and 30 days with a trend;
+  - a version history and change log per skill.
+- [ ] **Skill stock-take:**
+  - each skill gets a verdict (Keep, Improve, Update, Retire, or Merge into another) with a stated reason;
+  - nothing changes until the user confirms;
+  - this replaces the plain active → stale → archived curator.
+- [ ] **Skill compliance tests** (ECC `skill-comply`):
+  - scenarios that support, are neutral to, or compete with each `aos-*` skill;
+  - run headless through the board's ACP workers;
+  - tool-call traces scored against the skill's expected steps.
+
+  Catches regressions like the planning skill not using separate workers, or not using graphskill.
+
+## 4b. Task sizing and review depth
+
+- [ ] `aos-feature` tags each task with an operation (`feature`, `change`, `fix`, `refactor`) and a size (`trivial`, `small`, `standard`, `large`) when planning (ECC `orch-pipeline`):
+  - trivial tasks skip the reviewer;
+  - a fix starts by reproducing the bug as a failing test.
+- [ ] Security trigger: a diff touching auth, user input, database queries, file paths, secrets or crypto gets a security-focused reviewer.
+- [ ] `board.review: 2` for large or security tasks: two independent reviewers must both pass (ECC `santa-method`).
+- [ ] Optional: a council of fresh-context voices (skeptic, pragmatist, critic) for contract decisions (ECC `council`).
+- [ ] `aos doctor --security`: scan linked projects' `.claude`/`.kiro` configs for `Bash(*)`-style permissions, secrets in MCP configs, and hook injection (ECC AgentShield).
 
 ## 5. Knowledge ingest
 

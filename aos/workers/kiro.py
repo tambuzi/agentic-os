@@ -54,7 +54,8 @@ def agent_config(spec: RunSpec, settings: dict) -> dict:
         "allowedTools": list(dict.fromkeys(allowed)),
     }
     if shell:
-        cfg["toolsSettings"] = {"shell": {"allowedCommands": shell}}
+        from ..acp.permissions import HOOK_BYPASS_PATTERNS
+        cfg["toolsSettings"] = {"shell": {"allowedCommands": shell, "deniedCommands": list(HOOK_BYPASS_PATTERNS)}}
     if settings.get("model"):
         cfg["model"] = settings["model"]
     return cfg

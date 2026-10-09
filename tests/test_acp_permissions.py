@@ -93,3 +93,32 @@ def test_a_chain_with_anything_else_still_asks(wt, cmd):
 
 def test_a_dangerous_command_in_a_chain_is_rejected(wt):
     assert decide(call("execute", raw={"command": "npm test && git push origin main"}), ALLOWED, wt).decision == "reject"
+
+
+@pytest.mark.parametrize("cmd", ["git commit --no-verify -m x", "git commit -m x --no-verify", "git commit -nm x",
+                                 "git commit -n -m 'fix'", "git -c core.hooksPath=/dev/null commit -m x",
+                                 "git config core.hooksPath /dev/null", "git -c CORE.HOOKSPATH= commit -m x",
+                                 "npm test && git commit --no-verify -m x"])
+def test_skipping_git_hooks_is_never_allowed(wt, cmd):
+    # the project's hooks are part of its checks; a worker doesn't get to skip them
+    assert decide(call("execute", raw={"command": cmd}), ALLOWED, wt).decision == "reject"
+
+
+@pytest.mark.parametrize("cmd", ['git commit -m "no -n here"', "git commit -m x", "git log -n 3"])
+def test_ordinary_git_commands_are_unaffected(wt, cmd):
+    assert decide(call("execute", raw={"command": cmd}), ALLOWED + ["shell:git log"], wt).decision == "allow"
+
+
+@pytest.mark.parametrize("name", [".eslintrc.json", "eslint.config.mjs", ".prettierrc", "biome.json", "ruff.toml",
+                                  ".flake8", ".golangci.yml", ".pre-commit-config.yaml", ".husky/pre-commit",
+                                  "web/.stylelintrc.yml"])
+def test_editing_an_existing_lint_or_hook_config_asks(wt, name):
+    path = wt / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}")
+    d = decide(call("edit", raw={"file_path": str(path)}), ALLOWED, wt)
+    assert d.decision == "ask" and "config" in d.summary and d.rule is None  # never an "always" rule
+
+
+def test_creating_a_lint_config_is_fine(wt):
+    assert decide(call("edit", raw={"file_path": str(wt / ".prettierrc")}), ALLOWED, wt).decision == "allow"

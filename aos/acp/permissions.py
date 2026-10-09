@@ -21,6 +21,16 @@ _HARMLESS_KINDS = ("think", "switch_mode", "plan")
 _SEPARATORS = (";", "&&", "||", "|")
 _NOT_A_PLAIN_CHAIN = re.compile(r"[\r\n`<>()\\]|\$(?!\?)")  # newlines, substitution, redirects, $VAR ($? is fine)
 _HARMLESS_COMMANDS = ("echo", "true")
+# the project's git hooks are part of its checks: a worker never skips them. Regexes (no
+# lookaround) for agents that decide allow-listed commands themselves (Kiro's deniedCommands);
+# decide() checks tokens instead, so a commit message mentioning -n is fine.
+HOOK_BYPASS_PATTERNS = (r".*--no-verify.*", r"(?i).*core\.hookspath.*",
+                        r"git[ \t]+commit(?:[ \t]+[^ \t]+)*[ \t]+-[A-Za-z]*n[A-Za-z]*(?:[ \t].*)?")
+# lint / format / git-hook configs: agents edit these to make checks pass instead of fixing code
+_TOOL_CONFIG = re.compile(r"^(\.eslintrc(\..+)?|eslint\.config\..+|\.prettierrc(\..+)?|prettier\.config\..+"
+                          r"|\.?biome\.jsonc?|\.?ruff\.toml|\.flake8|\.pylintrc|mypy\.ini|\.shellcheckrc"
+                          r"|\.stylelintrc(\..+)?|stylelint\.config\..+|\.markdownlint(\..+)?|\.golangci\.ya?ml"
+                          r"|\.pre-commit-config\.ya?ml|\.editorconfig)$")
 
 
 @dataclass
@@ -57,6 +67,11 @@ def _paths(call: dict) -> list[str]:
         if isinstance(raw.get(key), str):
             paths.append(raw[key])
     return paths
+
+
+def _resolve(path: str, worktree: Path) -> Path:
+    p = Path(path)
+    return (Path(worktree).resolve() / p if not p.is_absolute() else p).resolve()
 
 
 def _inside(path: str, worktree: Path) -> bool:
@@ -103,6 +118,26 @@ def _allowed_command(cmd: str, allowed: list[str]) -> bool:
     return False
 
 
+def skips_git_hooks(cmd: str) -> bool:
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        tokens = cmd.split()
+    if "git" not in tokens and not any(t.endswith("/git") for t in tokens):
+        return False
+    if any(t.startswith("--no-verify") or "core.hookspath" in t.lower() for t in tokens):
+        return True
+    if "commit" in tokens:
+        after = tokens[tokens.index("commit") + 1:]
+        return any(re.fullmatch(r"-[A-Za-z]*n[A-Za-z]*", t) for t in after)
+    return False
+
+
+def _tool_config(path: str) -> bool:
+    p = Path(path)
+    return _TOOL_CONFIG.match(p.name) is not None or ".husky" in p.parts
+
+
 def _mcp_server(name: str) -> tuple[str, str] | None:
     m = re.match(r"^mcp__([A-Za-z0-9_-]+?)__(.+)$", name)
     if m:
@@ -126,6 +161,8 @@ def decide(call: dict, allowed: list[str], worktree: str | Path) -> Decision:
 
     if kind == "execute" or _command(call):
         cmd = _command(call) or name
+        if skips_git_hooks(_raw_command(call) or cmd):
+            return Decision("reject", f"run `{cmd}` (skips the project's git hooks; never allowed for board workers)")
         if any(p.search(cmd) for p in _DANGEROUS):
             return Decision("reject", f"run `{cmd}` (never allowed for board workers)")
         head = " ".join(cmd.split()[:2])
@@ -147,6 +184,9 @@ def decide(call: dict, allowed: list[str], worktree: str | Path) -> Decision:
             return Decision("reject", f"{kind} {outside[0]} (outside its worktree)")
         if not paths:
             return Decision("ask", f"{kind} {name or 'files'} (no path given)")
+        configs = [p for p in paths if _tool_config(p) and _resolve(p, worktree).exists()]
+        if configs:  # creating one is fine; changing the checks to make them pass is not
+            return Decision("ask", f"{kind} {configs[0]} (lint/format/hook config: fix the code, not the checks)")
         if "write" in allowed:
             return Decision("allow", f"{kind} {', '.join(paths[:3])}")
         return Decision("ask", f"{kind} {', '.join(paths[:3])}", "write")

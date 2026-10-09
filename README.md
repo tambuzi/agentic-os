@@ -258,6 +258,7 @@ The board still does the execution, so Claude Code users keep `aos board run`. L
 - the same failure twice stops a task;
 - an interrupted attempt makes the next one inspect the repository first;
 - a stale worker can't act on a newer attempt;
+- workers never skip the project's git hooks (`--no-verify`, `commit -n`, `core.hooksPath`), and editing an existing lint, format or hook config asks you first;
 - starts are staggered and gated by free memory (`board.parallel: auto`).
 
 **Cost:**
