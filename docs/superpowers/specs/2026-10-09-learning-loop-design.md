@@ -37,7 +37,7 @@ learner run  (run kind "learner", next to worker/reviewer)
    ▼
 <data>/lessons/<project>/<id>.md        (aos/lessons.py)
    ├─▶ worker contexts and `aos context`: a ranked "Lessons" section
-   ├─▶ promotion check → inbox proposal `memory add org` (with lesson_generalise)
+   ├─▶ promotion check → inbox proposal `memory add org` (the group's general_rule)
    └─▶ user: `aos lessons`, confirm/reject, edit files; MCP lessons_list / lesson_decide
 ```
 
@@ -89,6 +89,8 @@ promoted_to: null
 evidence:
   - {feature: checkout-v2, task: 4, events: [112, 118], kind: review_fail, at: 2026-10-09}
 same_as: []
+general_rule: null
+promotion: null
 created: 2026-10-09
 last_seen: 2026-10-09
 ---
@@ -100,6 +102,8 @@ Add an Alembic migration in the same commit as any model change; the reviewer re
 - **`status`**: `unreviewed`, `confirmed`, `rejected` or `superseded`.
 - **`evidence[].kind`**: `review_fail`, `verify_fail`, `retry`, `steer`, `permission_denied`, `block` or `human`.
 - **`same_as`**: ids written as `<project>/<id>` of lessons in *other* projects that state the same rule.
+- **`general_rule`**: the rule rewritten without project names, at most 300 characters. The learner must give it whenever it sets `same_as`.
+- **`promotion`**: the inbox proposal id while an org promotion of this lesson's group is pending.
 - **Body**: the action, a single paragraph of at most 300 characters.
 
 ### 4.2 Confidence
@@ -146,17 +150,17 @@ Cancelled tasks never qualify. A `learned` event on the task stops further runs.
   - **other projects' confirmed lessons** (project/id, trigger, action), for `same_as`.
 
   Board text is marked as quoted data.
-- **`lesson_new(trigger, action, domain, evidence_events, same_as=[])`**
+- **`lesson_new(trigger, action, domain, evidence_events, same_as=[], general_rule=None)`**
   - Validation:
     - trigger ≤ 120 characters, action ≤ 300;
     - no code blocks or lines that look like code;
     - no strings that look like secrets (the shared secret patterns);
     - `domain` must be from the list;
     - `evidence_events` must be events of this task;
-    - `same_as` must point to existing confirmed lessons in other projects;
+    - `same_as` must point to existing confirmed lessons in other projects, and `general_rule` is required with it (same text checks as the action);
     - a trigger nearly identical to a rejected lesson's is refused with "rejected before".
   - Returns the new id.
-- **`lesson_confirm(id, evidence_events)`** and **`lesson_contradict(id, evidence_events, why)`**: the id must be one of this project's lessons. The learner cannot confirm or contradict a rejected lesson.
+- **`lesson_confirm(id, evidence_events, same_as=[], general_rule=None)`** and **`lesson_contradict(id, evidence_events, why)`**: the id must be one of this project's lessons. The learner cannot confirm or contradict a rejected lesson.
 - **`learning_done(summary)`** ends the run. "nothing reusable" is a valid summary.
 - **Limits:** at most `max_ops_per_run` (3) write operations per run; any further ones are refused.
 
@@ -170,10 +174,10 @@ The **learner prompt** tells the run to:
 ### 5.3 Promotion to org memory
 
 - **Groups:** a group is the connected set of lessons linked by `same_as` in either direction.
-- **When a group qualifies:** it has **confirmed** lessons in at least 2 projects, none of them has `promoted_to`, and the group isn't in `<data>/lessons/.declined`. The dispatcher checks this after every human confirm and after every learner run.
-- **What happens:** it runs `lesson_generalise` (a learner call in `--generalise` mode over the group: one rule without project names, at most 300 characters). Then it stages **one** inbox proposal: `memory add org "<rule>"`, whose reason lists the lessons.
-- **On approval:** the lessons get `promoted_to: org`.
-- **On reject:** the group's ids are added to `.declined` and the group isn't proposed again.
+- **When a group qualifies:** it has **confirmed** lessons in at least 2 projects, none of them has `promoted_to` or a pending `promotion`, and the group isn't in `<data>/lessons/.declined`. The check runs after every learner run and after every human confirm (CLI or MCP); it is a plain file check with no AI run.
+- **What happens:** it stages **one** inbox proposal: `memory add org "<rule>"`, whose reason lists the lessons. The rule is the group's newest `general_rule`. Without one, it is the most confident lesson's "trigger: action" with project names removed. Every lesson in the group gets `promotion: <proposal id>`.
+- **On approval:** the lessons get `promoted_to: org` and `promotion` is cleared.
+- **On reject:** `promotion` is cleared, the group's ids are added to `.declined`, and the group isn't proposed again.
 
 The inbox's existing flow (`aos inbox apply|reject <id>`, `AOS.apply_proposal`) handles the decision. A small hook on apply and reject updates the lessons.
 
