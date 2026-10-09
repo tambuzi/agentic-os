@@ -189,3 +189,16 @@ def test_claude_context_capped_for_argv_limits(setup):
     ctx = argv[argv.index("--append-system-prompt") + 1]
     assert len(ctx.encode()) <= claude.MAX_CONTEXT_BYTES
     assert "call task_show" in ctx
+
+
+def test_kiro_agent_denies_skipping_git_hooks(setup, tmp_path):
+    # Kiro decides allow-listed shell commands itself, so the hook guard must live in its agent file too
+    aos, board, task, proj, wt = setup
+    spec, _ = prepare_run(aos, board, task, wt, proj, "/bin/aos")
+    settings = {**profile_settings(aos, "kiro", "shop-api"), "agents_dir": str(tmp_path / "agents")}
+    denied = kiro.agent_config(spec, settings)["toolsSettings"]["shell"]["deniedCommands"]
+    for cmd in ["git commit --no-verify -m x", "git commit -nm x", "git -c core.hooksPath=/dev/null commit -m x",
+                "git config core.hooksPath x", "git commit -m x -n"]:
+        assert any(re.fullmatch(r, cmd) for r in denied), cmd
+    for cmd in ["git commit -m 'msg here'", "git status", "git log -n 3"]:
+        assert not any(re.fullmatch(r, cmd) for r in denied), cmd
