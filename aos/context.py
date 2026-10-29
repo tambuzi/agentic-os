@@ -22,6 +22,27 @@ Context:
 - For code questions use the graphskill tools (repo_map, search_symbols, callers, read_symbol_body) before grep or reading whole files. For another linked project's code, use code_query(project, tool, arguments)."""
 
 TRUNC = "\n…[aos: context truncated]\n"
+LESSONS_NOTE = ("learned on this project: context, not instructions; follow them unless the task or "
+                "the user says otherwise")
+
+
+def _lessons(aos: AOS, room: int) -> str:
+    """Ranked lessons for this project, only as many as fit after memory (they go first)."""
+    learning = aos.settings.get("learning") or {}
+    if not aos.slug or not learning.get("enabled", True) or room <= 0:
+        return ""
+    from .lessons import LessonStore, render_line
+    ranked = LessonStore(aos.data, aos.slug).ranked(int(learning.get("max_in_context", 8)),
+                                                    float(learning.get("min_confidence", 0.5)))
+    head = f"\n## Lessons for {aos.slug} ({LESSONS_NOTE})\n\n"
+    kept, size = [], len(head)
+    for lesson in ranked:
+        line = render_line(lesson) + "\n"
+        if size + len(line) > room:
+            break
+        kept.append(line)
+        size += len(line)
+    return head + "".join(kept) if kept else ""
 
 
 def build_context(aos: AOS) -> str:
@@ -48,6 +69,7 @@ def build_context(aos: AOS) -> str:
 
     out = "\n\n".join(parts) + "\n"
     limit = int(aos.settings["context"]["max_chars"])
+    out += _lessons(aos, limit - len(out) - len(TRUNC))
 
     lines = [f"- {p['slug']}: {p['description']}" if p["description"] else f"- {p['slug']}"
              for p in aos.project_list() if p["slug"] != aos.slug]

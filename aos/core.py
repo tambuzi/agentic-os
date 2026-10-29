@@ -97,6 +97,7 @@ class AOS:
     def apply_proposal(self, pid: str) -> dict:
         p = inbox.load(self.data, pid)
         args = dict(p.get("args") or {})
+        promoted = args.pop("lessons", None)  # an org promotion of lessons (aos/lessons.py)
         if p.get("kind") == "memory":
             res = self.memory_write(args.pop("scope"), p["op"], args, direct=True)
         elif p.get("kind") == "skill":
@@ -104,10 +105,17 @@ class AOS:
         else:
             raise AosError(f"unknown proposal kind {p.get('kind')!r}")
         inbox.discard(self.data, pid)
+        if promoted:
+            from .lessons import settle_promotion
+            settle_promotion(self.data, promoted, applied=True)
         return {**res, "applied": True}
 
     def reject_proposal(self, pid: str) -> None:
+        promoted = (inbox.load(self.data, pid).get("args") or {}).get("lessons")
         inbox.discard(self.data, pid)
+        if promoted:
+            from .lessons import settle_promotion
+            settle_promotion(self.data, promoted, applied=False)
 
     # -- projects ------------------------------------------------------------
     def _projects_file(self) -> Path:

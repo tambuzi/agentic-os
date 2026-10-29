@@ -13,6 +13,7 @@ Behaviour comes from the environment:
       slow         stream an update every 0.2 s for FAKE_ACP_SLOW seconds, then complete
       refuse       end every turn with stopReason refusal
       error        answer every prompt with a JSON-RPC error
+  FAKE_ACP_LEARN  (learner role, from --learn) new (default) | nothing | silent | crash
   FAKE_ACP_COST   cost to report per turn (USD for claude, credits for kiro)
   FAKE_ACP_LOG    file where the agent appends what it saw (steers, permission outcomes, loads)
 The board task and generation are read from the aos MCP server args given in session/new.
@@ -55,6 +56,8 @@ def mode():
     t = state["task"]
     if state["role"] == "reviewer":
         return "review_" + os.environ.get("FAKE_ACP_REVIEW", "pass")
+    if state["role"] == "learner":
+        return "learn_" + os.environ.get("FAKE_ACP_LEARN", "new")
     return os.environ.get(f"FAKE_ACP_MODE_{t}", os.environ.get("FAKE_ACP_MODE", "echo"))
 
 
@@ -62,6 +65,13 @@ def board():
     from aos.board import Board
     from aos.config import data_root
     return Board(data_root())
+
+
+def learner():
+    from aos.config import repo_root
+    from aos.core import AOS
+    from aos.mcp_server import LearnerTools
+    return LearnerTools(AOS(repo_root()), board(), state["task"])
 
 
 def finish_turn(rid, sid, reason="end_turn"):
@@ -143,6 +153,21 @@ def run_prompt(rid, sid, text):
             note("permission_outcome", answer)
         complete_task(f"permission answer: {answer}")
         finish_turn(rid, sid)
+    elif m == "learn_new":
+        lt = learner()
+        corrections = lt.learning_input()["corrections"]
+        lt.lesson_new(f"when working on task {state['task']}", "Follow the guidance the user gave mid-task.",
+                      "workflow", [corrections[0]["event"]])
+        lt.learning_done("1 new lesson")
+        finish_turn(rid, sid)
+    elif m == "learn_nothing":
+        learner().learning_done("nothing reusable")
+        finish_turn(rid, sid)
+    elif m == "learn_silent":
+        state["cancel"].wait(timeout=600)
+        finish_turn(rid, sid, "cancelled")
+    elif m == "learn_crash":
+        os._exit(2)
     elif m in ("review_pass", "review_fail"):
         board().review_verdict(state["task"], m == "review_pass", "fake acp review", generation=state["generation"])
         finish_turn(rid, sid)
@@ -174,10 +199,11 @@ def handle(msg):
             state["task"] = int(args[args.index("--task") + 1])
         if "--attempt" in args:
             state["generation"] = int(args[args.index("--attempt") + 1])
-        state["role"] = "reviewer" if "--review" in args else "worker"
+        state["role"] = "reviewer" if "--review" in args else "learner" if "--learn" in args else "worker"
         sid = params.get("sessionId") or f"sess-{state['task']}-{time.time_ns()}"
         state["sessions"].add(sid)
         note(method, {"sessionId": sid, "meta": params.get("_meta"), "cwd": params.get("cwd"),
+                      "role": state["role"], "aos_args": args,
                       "mcp": [s.get("name") for s in params.get("mcpServers") or []]})
         modes = {"currentModeId": "default", "availableModes": [{"id": "default", "name": "Default"}]}
         if TOOL == "kiro":

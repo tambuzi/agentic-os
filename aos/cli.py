@@ -99,7 +99,9 @@ def cmd_context(a) -> int:
 
 def cmd_serve(a) -> int:
     from .mcp_server import run_server
-    run_server(a.project, a.task, a.attempt, a.review)
+    if a.learn and (a.review or a.task is None):
+        raise AosError("--learn needs --task and cannot be combined with --review")
+    run_server(a.project, a.task, a.attempt, a.review, learn=a.learn)
     return 0
 
 
@@ -180,6 +182,55 @@ def cmd_doctor(a) -> int:
          else "node not found (needed only for Claude over ACP)")
     for name in ("claude", "kiro"):
         line(*acp_tools.status(name, profile_settings(aos, name, ""), aos_home()))
+    from . import lessons as L
+    count, projects = 0, L.all_projects(aos.data)
+    for p in projects:
+        found, warnings = L.LessonStore(aos.data, p).list()
+        count += len(found)
+        for w in warnings:
+            line(False, w)
+    line(True, f"lessons: {count} in {len(projects)} project{'s' if len(projects) != 1 else ''}")
+    return 0
+
+
+def cmd_lessons(a) -> int:
+    from . import lessons as L
+    aos = AOS(repo_root())
+    words = list(a.args or [])
+    if words and words[0] in ("show", "confirm", "reject", "learn"):
+        if len(words) != 2:
+            raise AosError(f"usage: aos lessons {words[0]} {'<task>' if words[0] == 'learn' else '<project>/<id>'}")
+        action, target = words
+        if action == "learn":
+            board = Board(aos.data)
+            board.request_learning(int(target))
+            print(f"task #{target}: learning requested; the dispatcher runs a learner at its next tick")
+            return 0
+        project, _, lid = target.partition("/")
+        if not project or not lid:
+            raise AosError(f"a lesson is <project>/<id>, not {target!r}", "see `aos lessons`")
+        store = L.LessonStore(aos.data, project)
+        if action == "show":
+            store.get(lid)
+            print((store.dir / f"{lid}.md").read_text(), end="")
+            return 0
+        lesson = store.decide(lid, action == "confirm")
+        print(f"{lesson.ref}: {lesson.status} ({lesson.confidence:.1f})")
+        for pid in (L.stage_promotions(aos) if action == "confirm" else []):
+            print(f"promotion proposed: aos inbox show {pid}  (then aos inbox apply|reject {pid})")
+        return 0
+    projects = words[:1] or L.all_projects(aos.data)
+    shown = 0
+    for p in projects:
+        found, warnings = L.LessonStore(aos.data, p).list()
+        for w in warnings:
+            print(f"warn  {w}")
+        for l in found:
+            if a.all or l.status in L.ACTIVE:
+                print(f"{l.ref:<52} {l.status:<10} {l.effective_confidence():.1f}  {l.trigger}")
+                shown += 1
+    if not shown:
+        print("no lessons yet" if not a.all else "no lessons")
     return 0
 
 
@@ -458,6 +509,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--task", type=int, help="board worker mode for this task id")
     s.add_argument("--attempt", type=int, help="board worker mode: the attempt (generation) this worker owns")
     s.add_argument("--review", action="store_true", help="board reviewer mode: review_pass / review_fail only")
+    s.add_argument("--learn", action="store_true", help="board learner mode: lesson tools only")
     s.set_defaults(fn=cmd_serve)
 
     s = sub.add_parser("inbox", help="review staged memory/skill proposals")
@@ -536,6 +588,12 @@ def _parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_board)
     sub.add_parser("status", help="uncommitted agenticOS changes").set_defaults(fn=cmd_status)
     sub.add_parser("doctor", help="check installation").set_defaults(fn=cmd_doctor)
+
+    s = sub.add_parser("lessons", help="lessons learned from board corrections: list [project] [--all], "
+                                         "show|confirm|reject <project>/<id>, learn <task>")
+    s.add_argument("args", nargs="*")
+    s.add_argument("--all", action="store_true", help="include rejected and superseded lessons")
+    s.set_defaults(fn=cmd_lessons)
 
     s = sub.add_parser("acp", help="live agent sessions (ACP) for board workers")
     asub = s.add_subparsers(dest="action", required=True)

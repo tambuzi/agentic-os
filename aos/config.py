@@ -21,6 +21,8 @@ DEFAULTS = {
     },
     "skills": {"mode": "direct"},
     "context": {"max_chars": 16000},
+    "learning": {"enabled": True, "max_in_context": 8, "min_confidence": 0.5, "learner_timeout_min": 5,
+                 "max_ops_per_run": 3},
     "board": {"parallel": 3, "max_parallel": 6, "worker_memory_gb": 1.0, "min_free_memory_gb": 2.0,
               "start_stagger_sec": 2.0, "task_budget_usd": None, "feature_budget_usd": None,
               "task_budget_credits": None, "feature_budget_credits": None,
@@ -34,8 +36,8 @@ DEFAULTS = {
             "allowed_tools": ["read", "write", "shell:git status", "shell:git diff", "shell:git log",
                               "shell:git add", "shell:git commit", "mcp:aos", "mcp:graphskill"],
         },
-        "claude": {"model": "sonnet", "transport": "acp", "acp_adapter": None},
-        "kiro": {"model": None, "transport": "acp"},
+        "claude": {"model": "sonnet", "transport": "acp", "acp_adapter": None, "learning_model": "haiku"},
+        "kiro": {"model": None, "transport": "acp", "learning_model": None},
     },
 }
 

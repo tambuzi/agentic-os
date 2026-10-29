@@ -73,14 +73,14 @@ Replace one-shot `claude -p` / `kiro-cli chat --no-interactive` runs with **live
 - [x] Global per-machine tool setting: `aos worker claude|kiro`.
 - [x] Real Kiro run of the full scenario (kiro-cli 2.23.0, 16/16: `spikes/acp-kiro-e2e/REPORT-2026-10-08.md`).
 
-## 3. Learning loop (spec first)
+## 3. Learning loop (phase A + C done 2026-10-29; spec `docs/superpowers/specs/2026-10-09-learning-loop-design.md`)
 
 Lessons as small, scored facts that the team approves, learned first from the board. Several ideas come from [ECC](https://github.com/affaan-m/ECC)'s instincts (`skills/continuous-learning-v2`); we build our own version and don't integrate ECC.
 
-- [ ] **Lesson model:**
+- [x] **Lesson model:**
   - one trigger and one action, a `confidence` (0.3–0.9), a domain, `evidence` (event ids) and a scope (`project` or `org`);
   - confidence rises when a lesson is confirmed, drops when the user corrects it, and fades when unused.
-- [ ] **Learn from the board first.** It already records explicit corrections:
+- [x] **Learn from the board first.** It already records explicit corrections:
   - `review_fail` findings;
   - failed verifies;
   - retries with the same cause;
@@ -89,12 +89,38 @@ Lessons as small, scored facts that the team approves, learned first from the bo
   - `task_block` reasons.
 
   A cheap background pass turns repeated patterns into lesson candidates in the **inbox**, and the user approves them as today. Session hooks (Claude `Stop`/`PreCompact`, Kiro `agentStop`) are a later source; their payloads are scrubbed of secrets and size-capped.
-- [ ] **Promotion across projects.** The same lesson approved in 2 or more projects with high confidence is proposed as an org memory. This is the shared-context goal.
-- [ ] **Ranked context.** `aos context` already has a size cap. Add ranking: confidence plus relevance to the project and its stack, a maximum number of lessons, and a minimum confidence. The most useful lessons survive the cap, not the oldest.
+- [x] **Promotion across projects.** The same lesson approved in 2 or more projects with high confidence is proposed as an org memory. This is the shared-context goal.
+- [x] **Ranked context.** `aos context` already has a size cap. Add ranking: confidence plus relevance to the project and its stack, a maximum number of lessons, and a minimum confidence. The most useful lessons survive the cap, not the oldest.
 - [ ] **Memory trust.**
   - Memories record their source (`human`, `board`, `session`) and can be `superseded_by` a newer one instead of edited in place.
   - Recalled memory is evidence to check, not an instruction.
   - A `handoff` kind passes a feature between Claude Code and Kiro: objective, state, open questions, next action.
+
+## 3b. Model per task (next after the learning loop)
+
+Choose the model per task, not only per tool. Bounded change: a short design in chat, then test-first.
+
+- [ ] Precedence, like the tool choice: task > feature > project (`worker: {model: …}` in `projects.yaml`) > the tool's default in `aos.yaml`.
+- [ ] Flags: `aos task add … --model opus`, `aos feature new … --model haiku`, `task_create(..., model=)` for the planner, and `aos board run --model` for one run (like `--worker`).
+- [ ] `aos board` and `board_status` show tool/model/transport per task.
+- [ ] The model must fit the task's tool (Claude names for Claude, Kiro names for Kiro); a mismatch is refused when the task is created or retried.
+- [ ] Later, with 4b: the planner suggests a model from the task's size (trivial → cheap, large/security → strong).
+
+## 3c. Worker-to-worker messages (spec first)
+
+Let workers in the same feature talk directly, on top of ACP live delivery. Today they coordinate only through the timeline, the contract and dependency results.
+
+- [ ] `task_message(task, text)`: a worker sends a note to another task of the same feature.
+  - The board records it, so everything stays visible in one place.
+  - The dispatcher delivers it live like a steer: Claude gets it inside its current turn, Kiro after its running tool.
+  - A task that isn't running yet gets it at its next `board_read`.
+- [ ] Guardrails:
+  - same feature only;
+  - a limit per task, so no chat loops;
+  - messages are information from another worker, never instructions that override the task or the contract;
+  - no blocking "ask and wait", so no deadlocks. A worker that needs an answer uses `task_block`.
+- [ ] Contract changes still go through `task_propose_contract` and your approval; messages only coordinate within the current contract.
+- [ ] `aos board` / `board_status` show the messages, and the `aos-feature` skill reports them in the feature summary.
 
 ## 4. Recall and skill health
 

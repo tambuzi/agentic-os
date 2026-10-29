@@ -2,7 +2,7 @@
 
 A shared, self-improving brain for **Claude Code** and **Kiro** across all your projects. It is modelled on the learning loop of [hermes-agent](https://github.com/NousResearch/hermes-agent), and code knowledge comes from **graphskill**.
 
-agenticOS is not another agent. Claude Code and Kiro still do the work. agenticOS gives them five things:
+agenticOS is not another agent. Claude Code and Kiro still do the work. agenticOS gives them six things:
 
 | | What it is | Where it lives |
 |---|---|---|
@@ -10,9 +10,10 @@ agenticOS is not another agent. Claude Code and Kiro still do the work. agenticO
 | **Memory** | Small, capped facts that are injected into every session: `org`, `project`, `user` | local: `~/.agenticos/data/memory`, `~/.agenticos/user.md` |
 | **Knowledge** | Long-form business docs that agents search on demand | local: `~/.agenticos/data/knowledge` |
 | **Skills** | Step-by-step procedures that agents load when relevant, and can write themselves | this repo: `skills/` |
+| **Lessons** | Scored rules learned from the corrections in board work, confirmed by you, promoted to org memory when they hold across projects | local: `~/.agenticos/data/lessons` |
 | **Code graph** | Symbols, callers, dependencies (graphskill) | per project, managed by graphskill |
 
-**Business data never leaves your machine.** Memory, knowledge, the inbox and the project list live in `~/.agenticos/data`. That folder is outside this repo and outside iCloud-synced folders. Only code, skills, `SOUL.md`, `AGENTS.md` and `aos.yaml` go to GitHub.
+**Business data never leaves your machine.** Memory, knowledge, lessons, the inbox, the board and the project list live in `~/.agenticos/data`. That folder is outside this repo and outside iCloud-synced folders. Only code, skills, `SOUL.md`, `AGENTS.md` and `aos.yaml` go to GitHub.
 
 ---
 
@@ -102,6 +103,10 @@ aos inbox list                    # org-memory proposals waiting for approval
 aos inbox show <id>
 aos inbox apply <id>              # accept → written to org memory
 aos inbox reject <id>
+aos lessons [project] [--all]     # lessons learned from board corrections
+aos lessons confirm|reject <project>/<id>
+aos worker [claude|kiro]          # show or set the tool that runs board work on this machine
+aos acp install claude            # live worker sessions for Claude (Kiro needs nothing)
 aos sync <project>                # re-copy skills/config (also runs at every session start)
 aos status                        # uncommitted skill changes + inbox count
 aos doctor                        # health check
@@ -119,7 +124,15 @@ skills:
   mode: direct                        # or inbox, to review agent-written skills
 context:
   max_chars: 16000                    # size limit of the session-start context
+learning:
+  enabled: true                       # learner runs after board tasks that needed corrections
+  max_in_context: 8                   # lessons per project in a session or worker context
+  min_confidence: 0.5
+workers:
+  claude: {model: sonnet, learning_model: haiku}   # learning_model: the cheap model for learner runs
 ```
+
+Release notes: [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -158,6 +171,22 @@ They are searchable on the agent's next `knowledge_search`. There is no rebuild 
 
 When the agent finishes a non-trivial task, finds its way past a dead end, or gets corrected by you, the protocol tells it to save or patch a skill (`skill_manage`). Skills are written into this repo's `skills/`. Review them with `git diff` / `aos status`, then commit and push to share them with the team.
 
+### Lessons: learned from the board's corrections
+
+When a board task finishes after a correction, agenticOS runs a short **learner**. A correction is a failed review or check, a retry, your steer, a permission you denied, or a block.
+- The learner is read-only, uses a cheap model (`workers.<tool>.learning_model`, `haiku` on Claude), and has lesson tools only.
+- It turns what went wrong into a **lesson**: one trigger and one action, such as "when changing a database model: add a migration in the same commit".
+- It records the board events the lesson comes from as evidence, and gives it a confidence score.
+- Lessons are files in `~/.agenticos/data/lessons/<project>/` (local only, like all business data).
+
+How lessons are used:
+- The best ones go into that project's worker contexts and your sessions, ranked and capped (`learning.max_in_context`, 8). If space runs out, lessons are cut before memory.
+- New lessons apply straight away as *unreviewed*, starting at 0.5 (0.6 with strong evidence).
+- When the learner sees a lesson hold again, confidence rises by 0.1, up to 0.9. When it's contradicted, confidence drops by 0.2, and below 0.3 the lesson is rejected. Unused lessons fade slowly.
+- You decide with `aos lessons`, `aos lessons confirm|reject <project>/<id>`, or `lesson_decide` in the `aos-feature` end-of-feature report. Confirming sets at least 0.8 and the lesson no longer fades; rejecting is final.
+- **Across projects:** when the same lesson is confirmed in two or more projects (the learner links them), agenticOS proposes it as one **org memory** entry in the inbox. Accept it with `aos inbox apply` or decline it with `aos inbox reject`.
+- `aos lessons learn <task>` asks for a learner run by hand. `learning.enabled: false` turns learning off.
+
 ### Today vs. next
 
 | Growth path | Status |
@@ -166,12 +195,13 @@ When the agent finishes a non-trivial task, finds its way past a dead end, or ge
 | Org memory gated by human approval (inbox) | ✅ works now |
 | Humans add knowledge docs by dropping markdown in `data/knowledge/` | ✅ works now |
 | Agent writes long-form knowledge docs itself | ❌ not yet: agents have no `knowledge_write` tool; they save to memory or a skill instead |
-| **Automatic learning loop**: when a session ends, a background review reads the transcript and proposes memory/skill updates to the inbox (hermes-style) | 🔜 sub-project 2 |
+| **Learning loop from the board**: lessons from corrections, ranked into context, promoted to org memory when confirmed in 2+ projects | ✅ works now |
+| Learning from interactive sessions (Claude `Stop`, Kiro `agentStop` hooks) | 🔜 next phase of the learning loop |
 | Search past sessions; prune unused or duplicate skills | 🔜 sub-project 3 |
 | Import from Notion/Confluence into `knowledge/` | 🔜 sub-project 4 |
 | Multi-project features with parallel Claude Code / Kiro workers (board) | ✅ works now |
 
-Until sub-project 2 ships, learning only happens while a session is running. The agent saves things when the protocol or you prompt it. Saying *"save what you learned"* at the end of a session is a good habit.
+In interactive sessions (outside the board), learning still happens only while the session runs: the agent saves things when the protocol or you prompt it. Saying *"save what you learned"* at the end of a session is a good habit.
 
 ---
 
@@ -250,7 +280,7 @@ The board still does the execution, so Claude Code users keep `aos board run`. L
 
 **Before a task counts as done:**
 1. The worker's `task_complete` is only a claim.
-2. aos checks the task actually added commits and that the project's `verify_command` passes (set it in `~/.agenticos/data/projects.yaml`, e.g. `worker: {verify_command: "npm test"}`).
+2. aos checks the task actually added commits and that the project's `verify_command` passes. Set it in `~/.agenticos/data/projects.yaml`, e.g. `worker: {verify_command: "npm ci && npm test"}`. It runs as a shell command line, so every part of a chain runs. Workers are told the command and run it themselves before `task_complete`.
 3. A **separate reviewer** (same tool, fresh session, read-only) checks the task's own diff against the spec and the contract.
 4. If either step rejects the work, the worktree is reset to where the attempt started, and the findings go to the next attempt.
 
@@ -279,8 +309,12 @@ agenticOS repo (GitHub)               ~/.agenticos (local only, never pushed)
                                         data/
                                           memory/org.md, memory/projects/<slug>.md
                                           knowledge/*.md
+                                          lessons/<project>/*.md
                                           inbox/*.yaml
+                                          board.db, logs/, runs/   the board (SQLite file)
                                           projects.yaml
+                                        worktrees/<feature>/<project>   board work
+                                        acp/          Claude ACP adapter (aos acp install)
 ```
 
 ## Troubleshooting
@@ -301,4 +335,8 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 .venv/bin/python -m pytest -q
 ```
 
-Design spec: `docs/superpowers/specs/2026-10-01-agenticos-design.md` · Plan: `docs/superpowers/plans/2026-10-01-agenticos-core.md`
+- Specs and plans: `docs/superpowers/specs/` and `docs/superpowers/plans/`.
+- Roadmap: [ROADMAP.md](ROADMAP.md).
+- Release notes: [CHANGELOG.md](CHANGELOG.md).
+- CI: `.github/workflows/tests.yml` runs the suite on every pull request to `main` (Ubuntu with Python 3.11 and 3.13, plus macOS) and on pushes to `main`.
+- Throwaway end-to-end runners for real Claude/Kiro checks: `spikes/`.

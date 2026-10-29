@@ -135,3 +135,27 @@ def test_next_attempt_prompt_carries_the_feedback(env, monkeypatch, tmp_path):
     b.claim(t)
     spec, _ = prepare_run(AOS(repo, slug="api"), b, b.task(t), tmp_path / "wt", tmp_path, "/bin/aos")
     assert "not accepted" in spec.prompt and "no commits" in spec.prompt
+
+
+@pytest.mark.parametrize("command,ok", [("true && false", False), ("false || true", True),
+                                        ("test -f CHANGELOG.md && grep -q mul CHANGELOG.md", False)])
+def test_a_chained_verify_command_runs_every_part(tmp_path, command, ok):
+    # found in the learning-loop run: `a && b` was split into argv, so b never ran and the check passed
+    from aos.verify import verify_claim
+    subprocess = __import__("subprocess")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "CHANGELOG.md").write_text("- add\n")
+    passed, detail = verify_claim({"id": 1}, tmp_path, command, 30)
+    assert passed is ok, detail
+
+
+def test_a_timed_out_verify_command_leaves_nothing_running(tmp_path):
+    # review: only /bin/sh was killed; `sleep 3 && touch` went on in the worktree
+    import time
+    from aos.verify import verify_claim
+    __import__("subprocess").run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    passed, detail = verify_claim({"id": 1}, tmp_path, "sleep 7.31 && true", 1)
+    assert not passed and "timed out" in detail
+    time.sleep(0.3)
+    left = __import__("subprocess").run(["pgrep", "-f", "sleep 7.31"], capture_output=True, text=True).stdout
+    assert left.strip() == ""
