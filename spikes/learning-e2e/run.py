@@ -1,12 +1,13 @@
 """Spike: the learning loop end to end with a real agent tool (Claude or Kiro).
 
 Throwaway verification, not product code. In a throwaway AOS_HOME (real business data is never
-touched) with two demo projects, api and web, whose verify command also requires a CHANGELOG.md
-entry that the task specs never mention:
+touched) with two demo projects, api and web. The team convention "every new function gets a
+CHANGELOG.md entry" is never written in a spec; the user gives it as a mid-task steer:
 
-  1. feature f1 on api: the first attempt fails verification (no changelog), the retry passes,
-     then a learner run records a lesson                         -> lesson on api with evidence
-  2. feature f2 on api: the lesson is in the new worker's context -> context.md contains it
+  1. feature f1 on api: the driver steers the worker with the convention, then a learner run
+     records a lesson                                            -> lesson on api with evidence
+  2. feature f2 on api, no steer: the lesson is in the new worker's context, and the worker
+     follows it on its own                                       -> CHANGELOG.md mentions sub
   3. `aos lessons confirm` on the api lesson                      -> confirmed, 0.8
   4. feature f3 on web: the same correction; the learner sees the api lesson in other_projects
      and links it (same_as + general_rule)                        -> web lesson linked (AI-dependent)
@@ -33,7 +34,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 AOS = [sys.executable, "-c", "import sys; from aos.cli import main; sys.exit(main(sys.argv[1:]))"]
-VERIFY = 'python3 test_calc.py && grep -q "{fn}" CHANGELOG.md'
+VERIFY = "python3 test_calc.py"
+STEER = "Team convention: every new function gets a one-line entry in CHANGELOG.md, in the same commit."
 SPEC = ("Add a function `{fn}(a, b)` to calc.py that returns {expr}, and add an assertion for it to "
         "test_calc.py. Run `python3 test_calc.py` to check it passes, then commit your change with git.")
 
@@ -118,7 +120,7 @@ class Run:
         p.write_text(yaml.safe_dump(d))
 
     # -- one feature -----------------------------------------------------------
-    def feature(self, slug: str, project: str, fn: str, expr: str) -> int:
+    def feature(self, slug: str, project: str, fn: str, expr: str, steer: bool = False) -> int:
         self.set_verify(project, fn)
         spec = self.root / f"{slug}.md"
         spec.write_text(SPEC.format(fn=fn, expr=expr))
@@ -130,8 +132,13 @@ class Run:
                                 cwd=self.root, stdout=log, stderr=subprocess.STDOUT)
         self.note(f"{slug}: task #{tid} on {project}, dispatcher pid {disp.pid}")
         b, deadline = self.board(), time.monotonic() + 60 * self.args.timeout
+        steered = not steer
         try:
             while disp.poll() is None and time.monotonic() < deadline:
+                if not steered and b.task(tid)["status"] == "running":
+                    self.note(f"{slug}: steer #{tid}: {STEER}")
+                    self.aos("task", "steer", str(tid), STEER)
+                    steered = True
                 for p in b.permissions(status="pending"):
                     self.note(f"approve permission #{p['id']} ({p['role']}): {p['summary'][:90]}")
                     self.aos("task", "approve", str(p["id"]), check=False)
@@ -154,14 +161,15 @@ class Run:
 
     # -- scenario --------------------------------------------------------------
     def drive(self) -> None:
-        t1 = self.feature("f1", "api", "mul", "a * b")
+        t1 = self.feature("f1", "api", "mul", "a * b", steer=True)
         b = self.board()
         self.check(b.task(t1)["status"] == "done", "f1: task done")
-        self.check(any(s["kind"] in ("verify_fail", "review_fail") for s in b.correction_signals(t1)),
-                   "f1: the first attempt was corrected (verify or review)")
+        self.check(any(s["kind"] == "steer" for s in b.correction_signals(t1)), "f1: the steer is a correction signal")
         self.check(any(e["kind"] == "learned" for e in b.task_events(t1)), "f1: a learner ran")
         api = [l for l in self.lessons("api") if l.status != "rejected"]
-        self.check(bool(api), f"f1: lesson(s) on api: {[l.trigger for l in api]}")
+        self.check(bool(api), f"f1: lesson(s) on api: {[l.trigger + ' -> ' + l.action for l in api]}")
+        self.check(any("changelog" in (l.trigger + l.action).lower() for l in api),
+                   "f1: the lesson states the project fact (CHANGELOG), not generic advice")
         if not api:
             return
         lesson = max(api, key=lambda l: l.confidence)
@@ -169,13 +177,15 @@ class Run:
         t2 = self.feature("f2", "api", "sub", "a - b")
         ctx = (self.home / "data" / "runs" / f"{t2}-1" / "context.md")
         self.check(ctx.exists() and lesson.trigger in ctx.read_text(), "f2: the lesson is in the worker's context")
-        self.check(self.board().task(t2)["attempts"] == 1, "f2: done in one attempt (the lesson helped)")
+        wt = self.home / "worktrees" / "f2" / "api"
+        changelog = (wt / "CHANGELOG.md").read_text() if (wt / "CHANGELOG.md").exists() else ""
+        self.check("sub" in changelog, "f2: without a steer, the worker followed the lesson (CHANGELOG mentions sub)")
 
         self.out["confirm api"] = self.aos("lessons", "confirm", lesson.ref)
         from aos.lessons import find
         self.check(find(self.home / "data", lesson.ref).confidence == 0.8, "confirm: api lesson at 0.8")
 
-        self.feature("f3", "web", "mul", "a * b")
+        self.feature("f3", "web", "mul", "a * b", steer=True)
         web = [l for l in self.lessons("web") if l.status != "rejected"]
         self.check(bool(web), f"f3: lesson(s) on web: {[l.trigger for l in web]}")
         linked = [l for l in web if lesson.ref in l.same_as]
