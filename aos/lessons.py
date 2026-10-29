@@ -369,6 +369,40 @@ def render_line(lesson: Lesson, today: date | None = None) -> str:
     return f"- [{lesson.effective_confidence(today):.1f}{mark}] {lesson.trigger}: {lesson.action}"
 
 
+def _group_rule(group: list[Lesson]) -> str:
+    with_rule = sorted((l for l in group if l.general_rule), key=lambda l: l.last_seen)
+    if with_rule:
+        return with_rule[-1].general_rule
+    best = max(group, key=lambda l: (l.confidence, l.last_seen))
+    text = f"{best.trigger}: {best.action}"
+    for slug in sorted({l.project for l in group}, key=len, reverse=True):
+        text = re.sub(rf"\b{re.escape(slug)}\b", "the project", text)
+    return text
+
+
 def stage_promotions(aos) -> list[str]:
-    """Stage org-memory proposals for lesson groups confirmed in 2+ projects (filled in Task 6)."""
-    return []
+    """One inbox proposal (org memory) per lesson group confirmed in 2+ projects; the lessons
+    remember it (`promotion`) so it is proposed once. Applied → promoted_to: org; rejected →
+    declined for good (see AOS.apply_proposal / reject_proposal)."""
+    from . import inbox
+    staged = []
+    for group in promotion_candidates(aos.data):
+        refs = [l.ref for l in group]
+        projects = sorted({l.project for l in group if l.status == "confirmed"})
+        pid = inbox.stage(aos.data, "memory", "add", {"scope": "org", "text": _group_rule(group), "lessons": refs},
+                          source="learning", reason=f"lesson confirmed in {len(projects)} projects "
+                                                    f"({', '.join(projects)}): {', '.join(refs)}")
+        for l in group:
+            LessonStore(aos.data, l.project).set_fields(l.id, promotion=pid)
+        staged.append(pid)
+    return staged
+
+
+def settle_promotion(data: str | Path, refs: list[str], applied: bool) -> None:
+    """The user decided an org promotion in the inbox."""
+    group = [l for l in (find(data, r) for r in refs) if l is not None]
+    for l in group:
+        fields = {"promotion": None, **({"promoted_to": "org"} if applied else {})}
+        LessonStore(data, l.project).set_fields(l.id, **fields)
+    if not applied and group:
+        decline(data, group)
