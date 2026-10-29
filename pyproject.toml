@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agenticos"
-version = "0.1.0"
+version = "0.7.0"
 description = "agenticOS: a shared, self-improving brain for Claude Code and Kiro across projects."
 requires-python = ">=3.11"
 dependencies = ["mcp>=1.2", "pyyaml>=6"]

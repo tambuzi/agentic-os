@@ -2,7 +2,7 @@
 
 A shared, self-improving brain for **Claude Code** and **Kiro** across all your projects. It is modelled on the learning loop of [hermes-agent](https://github.com/NousResearch/hermes-agent), and code knowledge comes from **graphskill**.
 
-agenticOS is not another agent. Claude Code and Kiro still do the work. agenticOS gives them five things:
+agenticOS is not another agent. Claude Code and Kiro still do the work. agenticOS gives them six things:
 
 | | What it is | Where it lives |
 |---|---|---|
@@ -10,9 +10,10 @@ agenticOS is not another agent. Claude Code and Kiro still do the work. agenticO
 | **Memory** | Small, capped facts that are injected into every session: `org`, `project`, `user` | local: `~/.agenticos/data/memory`, `~/.agenticos/user.md` |
 | **Knowledge** | Long-form business docs that agents search on demand | local: `~/.agenticos/data/knowledge` |
 | **Skills** | Step-by-step procedures that agents load when relevant, and can write themselves | this repo: `skills/` |
+| **Lessons** | Scored rules learned from the corrections in board work, confirmed by you, promoted to org memory when they hold across projects | local: `~/.agenticos/data/lessons` |
 | **Code graph** | Symbols, callers, dependencies (graphskill) | per project, managed by graphskill |
 
-**Business data never leaves your machine.** Memory, knowledge, the inbox and the project list live in `~/.agenticos/data`. That folder is outside this repo and outside iCloud-synced folders. Only code, skills, `SOUL.md`, `AGENTS.md` and `aos.yaml` go to GitHub.
+**Business data never leaves your machine.** Memory, knowledge, lessons, the inbox, the board and the project list live in `~/.agenticos/data`. That folder is outside this repo and outside iCloud-synced folders. Only code, skills, `SOUL.md`, `AGENTS.md` and `aos.yaml` go to GitHub.
 
 ---
 
@@ -102,6 +103,10 @@ aos inbox list                    # org-memory proposals waiting for approval
 aos inbox show <id>
 aos inbox apply <id>              # accept → written to org memory
 aos inbox reject <id>
+aos lessons [project] [--all]     # lessons learned from board corrections
+aos lessons confirm|reject <project>/<id>
+aos worker [claude|kiro]          # show or set the tool that runs board work on this machine
+aos acp install claude            # live worker sessions for Claude (Kiro needs nothing)
 aos sync <project>                # re-copy skills/config (also runs at every session start)
 aos status                        # uncommitted skill changes + inbox count
 aos doctor                        # health check
@@ -119,7 +124,15 @@ skills:
   mode: direct                        # or inbox, to review agent-written skills
 context:
   max_chars: 16000                    # size limit of the session-start context
+learning:
+  enabled: true                       # learner runs after board tasks that needed corrections
+  max_in_context: 8                   # lessons per project in a session or worker context
+  min_confidence: 0.5
+workers:
+  claude: {model: sonnet, learning_model: haiku}   # learning_model: the cheap model for learner runs
 ```
+
+Release notes: [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -267,7 +280,7 @@ The board still does the execution, so Claude Code users keep `aos board run`. L
 
 **Before a task counts as done:**
 1. The worker's `task_complete` is only a claim.
-2. aos checks the task actually added commits and that the project's `verify_command` passes (set it in `~/.agenticos/data/projects.yaml`, e.g. `worker: {verify_command: "npm test"}`).
+2. aos checks the task actually added commits and that the project's `verify_command` passes. Set it in `~/.agenticos/data/projects.yaml`, e.g. `worker: {verify_command: "npm ci && npm test"}`. It runs as a shell command line, so every part of a chain runs. Workers are told the command and run it themselves before `task_complete`.
 3. A **separate reviewer** (same tool, fresh session, read-only) checks the task's own diff against the spec and the contract.
 4. If either step rejects the work, the worktree is reset to where the attempt started, and the findings go to the next attempt.
 
@@ -296,8 +309,12 @@ agenticOS repo (GitHub)               ~/.agenticos (local only, never pushed)
                                         data/
                                           memory/org.md, memory/projects/<slug>.md
                                           knowledge/*.md
+                                          lessons/<project>/*.md
                                           inbox/*.yaml
+                                          board.db, logs/, runs/   the board (SQLite file)
                                           projects.yaml
+                                        worktrees/<feature>/<project>   board work
+                                        acp/          Claude ACP adapter (aos acp install)
 ```
 
 ## Troubleshooting
@@ -318,4 +335,7 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 .venv/bin/python -m pytest -q
 ```
 
-Design spec: `docs/superpowers/specs/2026-10-01-agenticos-design.md` · Plan: `docs/superpowers/plans/2026-10-01-agenticos-core.md`
+- Specs and plans: `docs/superpowers/specs/` and `docs/superpowers/plans/`.
+- Roadmap: [ROADMAP.md](ROADMAP.md).
+- Release notes: [CHANGELOG.md](CHANGELOG.md).
+- Throwaway end-to-end runners for real Claude/Kiro checks: `spikes/`.
