@@ -8,6 +8,8 @@ cycles cannot be formed.
 
 from __future__ import annotations
 
+import re
+
 import sqlite3
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
@@ -371,6 +373,64 @@ class Board:
             c.execute("UPDATE permissions SET status='expired', decided=? WHERE id=?", (now(), int(pid)))
             self._event(c, p["feature"], p["task"], "decision", "dispatcher",
                         f"permission #{pid} refused ({why}): {p['summary']}")
+
+    # -- learning (spec 2026-10-09 §5.1) ------------------------------------------
+    _FAILED_ATTEMPT = re.compile(r"^attempt \d+ (failed|not accepted)")
+    _STARTED = re.compile(r"^attempt \d+ started")
+    _DENIED = re.compile(r"^permission #\d+ denied")
+
+    def task_events(self, tid: int) -> list[dict]:
+        return self._rows("SELECT * FROM events WHERE task=? ORDER BY id", (int(tid),))
+
+    def correction_signals(self, tid: int) -> list[dict]:
+        """The corrections in a task's timeline (all attempts): what a learner learns from.
+        Each is {"kind", "event", "text"}; a retry is anchored on the attempt that retried."""
+        out, failed_before = [], False
+        for e in self.task_events(tid):
+            kind, body = e["kind"], e["body"] or ""
+            if kind == "rejected":
+                out.append(("review_fail" if body.startswith("independent review:") else "verify_fail", e))
+            elif kind == "status" and self._FAILED_ATTEMPT.match(body):
+                failed_before = True
+            elif kind == "status" and self._STARTED.match(body):
+                if failed_before:
+                    out.append(("retry", e))
+                failed_before = False
+            elif kind in ("steer", "steer_now"):
+                out.append(("steer", e))
+            elif kind == "decision" and self._DENIED.match(body):
+                out.append(("permission_denied", e))
+            elif kind == "blocker":
+                out.append(("block", e))
+        return [{"kind": k, "event": e["id"], "text": e["body"] or ""} for k, e in out]
+
+    def _wants_learning(self, tid: int) -> bool:
+        events = self.task_events(tid)
+        learned = max((e["id"] for e in events if e["kind"] == "learned"), default=0)
+        requested = max((e["id"] for e in events if e["kind"] == "learn"), default=0)
+        if requested > learned:
+            return True
+        return not learned and bool(self.correction_signals(tid))
+
+    def learnable(self, feature: str | None = None) -> list[dict]:
+        """Finished tasks (done/failed) whose corrections haven't been learned from yet, or
+        that the user asked to learn from again (`aos lessons learn`)."""
+        sql, params = "SELECT * FROM tasks WHERE status IN ('done', 'failed')", []
+        if feature:
+            sql, params = sql + " AND feature=?", [feature]
+        return [t for t in self._rows(sql + " ORDER BY id", params) if self._wants_learning(t["id"])]
+
+    def mark_learned(self, tid: int, summary: str, author: str = "learner") -> None:
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            self._event(c, t["feature"], int(tid), "learned", author, (summary or "").strip() or "learned")
+
+    def request_learning(self, tid: int, author: str = "human") -> None:
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            if t["status"] not in ("done", "failed"):
+                raise AosError(f"task #{tid} is {t['status']}; only done or failed tasks can be learned from")
+            self._event(c, t["feature"], int(tid), "learn", author, "learning requested")
 
     def steer(self, tid: int, message: str, author: str = "human", now: bool = False) -> None:
         """A message from the user for the task's worker: delivered live to an ACP session,
