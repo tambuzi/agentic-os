@@ -99,7 +99,9 @@ def cmd_context(a) -> int:
 
 def cmd_serve(a) -> int:
     from .mcp_server import run_server
-    run_server(a.project, a.task, a.attempt, a.review)
+    if a.learn and (a.review or a.task is None):
+        raise AosError("--learn needs --task and cannot be combined with --review")
+    run_server(a.project, a.task, a.attempt, a.review, learn=a.learn)
     return 0
 
 
@@ -458,6 +460,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--task", type=int, help="board worker mode for this task id")
     s.add_argument("--attempt", type=int, help="board worker mode: the attempt (generation) this worker owns")
     s.add_argument("--review", action="store_true", help="board reviewer mode: review_pass / review_fail only")
+    s.add_argument("--learn", action="store_true", help="board learner mode: lesson tools only")
     s.set_defaults(fn=cmd_serve)
 
     s = sub.add_parser("inbox", help="review staged memory/skill proposals")
