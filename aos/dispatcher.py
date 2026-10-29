@@ -28,7 +28,7 @@ from .board import Board
 from .core import AOS
 from .errors import AosError
 from .workers import adapter
-from .workers.common import (Launch, add_allowed_tool, linked_project_path, parse_cost, prepare_review,
+from .workers.common import (Launch, add_allowed_tool, linked_project_path, parse_cost, prepare_learn, prepare_review,
                              prepare_run)
 from .acp.permissions import decide
 from .acp.runner import AcpRun
@@ -63,6 +63,7 @@ class Running:
     allowed: list | None = None       # neutral allow-list, for ACP permission requests
     worktree: Path | None = None
     generation: int = 0               # the attempt token it was launched with
+    learn_since: int = 0              # learner: the run is over once a `learned` event follows this id
 
 
 def process_start(pid: int) -> str | None:
@@ -208,7 +209,8 @@ class Dispatcher:
         """Nothing running and nothing that can start: the rest needs a human (blocked,
         stuck, failed) or the feature is finished."""
         return (not self.running and not self.verifying and not self.board.dispatchable(self.feature)
-                and not self.board.reviewable(self.feature))
+                and not self.board.reviewable(self.feature)
+                and not (self._learning_on() and self.board.learnable(self.feature)))
 
     def run(self, once: bool = False, until_done: bool = False) -> None:
         self.once = once
@@ -229,6 +231,7 @@ class Dispatcher:
                         self._start_verifications()
                         if not self.stopping:
                             self._launch_reviews()
+                            self._launch_learners()
                     self.board.promote()
                     return
                 while not (self.stopping and not self.running):
@@ -259,6 +262,7 @@ class Dispatcher:
         if not self.stopping:
             self._launch_ready()
             self._launch_reviews()
+            self._launch_learners()
         self._start_verifications()
         self._report_stuck()
 
@@ -360,7 +364,7 @@ class Dispatcher:
                 acp.end_reason = "the model refused the turn (stopReason: refusal)"
                 acp.close()
                 return
-            if self._still_owns(r, self.board.task(tid)) and not acp.nudged:
+            if r.kind != "learner" and self._still_owns(r, self.board.task(tid)) and not acp.nudged:
                 acp.nudged = True  # one reminder in the same session before the attempt counts as failed
                 acp.session.prompt(self.NUDGES[r.kind])
                 return
@@ -411,6 +415,8 @@ class Dispatcher:
         options = params.get("options") or []
         if verdict.decision == "ask" and verdict.summary in r.approved:
             verdict.decision = "allow"  # the user already allowed exactly this during this attempt
+        if verdict.decision == "ask" and r.kind == "learner":
+            verdict.decision = "reject"  # a learner only has its lesson tools; never bother the user
         if verdict.decision == "ask":  # the user decides; the worker waits (not a stall)
             pid = self.board.request_permission(tid, verdict.summary, json.dumps(params.get("toolCall") or {})[:4000],
                                                 verdict.rule, generation=r.generation, role=r.kind)
@@ -504,6 +510,9 @@ class Dispatcher:
         if r.kind == "reviewer":
             return (task["status"] == "review" and task["review_stage"] == "reviewing"
                     and task["generation"] == r.generation)
+        if r.kind == "learner":
+            return not any(e["kind"] == "learned" and e["id"] > r.learn_since
+                           for e in self.board.task_events(task["id"]))
         return task["status"] == "running"
 
     def _reap_one(self, tid: int, r: Running) -> None:
@@ -541,6 +550,15 @@ class Dispatcher:
         del self.running[tid]
         self._record_cost(tid, r)
         task = self.board.task(tid)
+        if r.kind == "learner":
+            if self._still_owns(r, task):  # it never called learning_done
+                why = (f"timed out after {r.timeout_min:g} min" if r.timed_out
+                       else "stalled" if r.acp and r.acp.stalled
+                       else f"exited with code {code}" if code
+                       else r.acp.end_reason if r.acp and r.acp.end_reason else "ended without learning_done")
+                self.board.mark_learned(tid, f"learning failed: {why}", author="dispatcher")
+            self._stage_promotions()
+            return
         if not self._still_owns(r, task):
             return
         stall_min = float(self.aos.settings["board"].get("stall_min", 10))
@@ -698,6 +716,67 @@ class Dispatcher:
                                     kind="reviewer", generation=task["generation"], started_at=time.monotonic(),
                                     log_path=log_path, acp=acp, allowed=spec.allowed, worktree=spec.worktree)
         self._last_start = time.monotonic()
+
+    # -- learning (spec 2026-10-09) ----------------------------------------------
+    def _learning_on(self) -> bool:
+        return bool((self.aos.settings.get("learning") or {}).get("enabled", True))
+
+    def _launch_learners(self) -> None:
+        """A short read-only learner run for each finished task whose corrections weren't
+        learned from yet. Never touches the task; learners don't hold the worktree."""
+        if not self._learning_on():
+            return
+        try:
+            tasks = self.board.learnable(self.feature)
+        except TASK_ERRORS as e:
+            _warn(f"board read: {e}")
+            return
+        for t in tasks:
+            if t["id"] in self.running:
+                continue
+            if not self._may_start():
+                break
+            try:
+                over = self._over_budget(t)
+                if over:
+                    self.board.mark_learned(t["id"], f"learning skipped: {over.split(';')[0]}", author="dispatcher")
+                    continue
+                self._launch_learner(t)
+            except TASK_ERRORS as e:
+                _warn(f"task #{t['id']} learning: {e}")
+
+    def _launch_learner(self, t: dict) -> None:
+        tid = t["id"]
+        since = max((e["id"] for e in self.board.task_events(tid)), default=0)
+        n = 1 + sum(1 for e in self.board.task_events(tid) if e["kind"] == "learned")
+        launch = None
+        try:
+            project_path = linked_project_path(t["project"])
+            aos = AOS(self.aos.repo, home=self.aos.home, slug=t["project"], data=self.aos.data)
+            spec, settings = prepare_learn(aos, self.board, t, project_path, self.aos_bin, run=n)
+            mod = adapter(settings["adapter"])
+            log_path = self.board.data / "logs" / f"{tid}-learn-{n}.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            proc, launch, acp, log, transport = self._spawn(tid, spec, settings, mod, log_path)
+        except Exception as e:  # learning is optional: a learner that can't start is only noted
+            if launch:
+                launch.cleanup()
+            self.board.mark_learned(tid, f"learning failed: could not start ({e})", author="dispatcher")
+            return
+        timeout = float((self.aos.settings.get("learning") or {}).get("learner_timeout_min", 5))
+        self.running[tid] = Running(proc, launch, time.monotonic() + 60 * timeout, timeout, log,
+                                    getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"],
+                                    kind="learner", generation=t["generation"], started_at=time.monotonic(),
+                                    log_path=log_path, acp=acp, allowed=spec.allowed, worktree=spec.worktree,
+                                    learn_since=since)
+        self._last_start = time.monotonic()
+
+    def _stage_promotions(self) -> None:
+        from . import lessons
+        try:
+            lessons.stage_promotions(self.aos)
+        except Exception as e:  # promotion is a proposal; never let it break the dispatcher
+            _warn(f"lesson promotion: {e}")
 
     def _launch(self, t: dict) -> None:
         tid = t["id"]

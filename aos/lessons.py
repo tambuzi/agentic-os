@@ -367,3 +367,8 @@ def promotion_candidates(data: str | Path) -> list[list[Lesson]]:
 def render_line(lesson: Lesson, today: date | None = None) -> str:
     mark = " ✓" if lesson.status == "confirmed" else ""
     return f"- [{lesson.effective_confidence(today):.1f}{mark}] {lesson.trigger}: {lesson.action}"
+
+
+def stage_promotions(aos) -> list[str]:
+    """Stage org-memory proposals for lesson groups confirmed in 2+ projects (filled in Task 6)."""
+    return []
