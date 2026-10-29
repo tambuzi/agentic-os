@@ -338,4 +338,5 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 - Specs and plans: `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 - Roadmap: [ROADMAP.md](ROADMAP.md).
 - Release notes: [CHANGELOG.md](CHANGELOG.md).
+- CI: `.github/workflows/tests.yml` runs the suite on every pull request to `main` (Ubuntu with Python 3.11 and 3.13, plus macOS) and on pushes to `main`.
 - Throwaway end-to-end runners for real Claude/Kiro checks: `spikes/`.

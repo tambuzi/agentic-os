@@ -17,6 +17,7 @@ Releases before 0.7.0 were numbered after the fact, one per merged pull request,
   - **Settings:** `learning.enabled`, `max_in_context`, `min_confidence`, `learner_timeout_min`, `max_ops_per_run`.
   - **Board and doctor:** `board_status` gains `lessons` and `pending_promotions`, and `aos doctor` reports lesson counts and broken lesson files.
 - Worker contexts name the project's `verify_command`, so workers run it before `task_complete`.
+- **GitHub Actions CI:** the test suite runs on every pull request to `main` and on pushes to `main` (Ubuntu with Python 3.11 and 3.13, plus macOS).
 
 ### Fixed
 - **A string `verify_command` ran only its first command.** It was split into arguments instead of being run by a shell, so in `npm ci && npm test` only `npm ci` ran, and a failing check could pass. It now runs through `/bin/sh -c`.
