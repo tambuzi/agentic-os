@@ -73,14 +73,14 @@ Replace one-shot `claude -p` / `kiro-cli chat --no-interactive` runs with **live
 - [x] Global per-machine tool setting: `aos worker claude|kiro`.
 - [x] Real Kiro run of the full scenario (kiro-cli 2.23.0, 16/16: `spikes/acp-kiro-e2e/REPORT-2026-10-08.md`).
 
-## 3. Learning loop (spec first)
+## 3. Learning loop (phase A + C done 2026-10-29; spec `docs/superpowers/specs/2026-10-09-learning-loop-design.md`)
 
 Lessons as small, scored facts that the team approves, learned first from the board. Several ideas come from [ECC](https://github.com/affaan-m/ECC)'s instincts (`skills/continuous-learning-v2`); we build our own version and don't integrate ECC.
 
-- [ ] **Lesson model:**
+- [x] **Lesson model:**
   - one trigger and one action, a `confidence` (0.3–0.9), a domain, `evidence` (event ids) and a scope (`project` or `org`);
   - confidence rises when a lesson is confirmed, drops when the user corrects it, and fades when unused.
-- [ ] **Learn from the board first.** It already records explicit corrections:
+- [x] **Learn from the board first.** It already records explicit corrections:
   - `review_fail` findings;
   - failed verifies;
   - retries with the same cause;
@@ -89,8 +89,8 @@ Lessons as small, scored facts that the team approves, learned first from the bo
   - `task_block` reasons.
 
   A cheap background pass turns repeated patterns into lesson candidates in the **inbox**, and the user approves them as today. Session hooks (Claude `Stop`/`PreCompact`, Kiro `agentStop`) are a later source; their payloads are scrubbed of secrets and size-capped.
-- [ ] **Promotion across projects.** The same lesson approved in 2 or more projects with high confidence is proposed as an org memory. This is the shared-context goal.
-- [ ] **Ranked context.** `aos context` already has a size cap. Add ranking: confidence plus relevance to the project and its stack, a maximum number of lessons, and a minimum confidence. The most useful lessons survive the cap, not the oldest.
+- [x] **Promotion across projects.** The same lesson approved in 2 or more projects with high confidence is proposed as an org memory. This is the shared-context goal.
+- [x] **Ranked context.** `aos context` already has a size cap. Add ranking: confidence plus relevance to the project and its stack, a maximum number of lessons, and a minimum confidence. The most useful lessons survive the cap, not the oldest.
 - [ ] **Memory trust.**
   - Memories record their source (`human`, `board`, `session`) and can be `superseded_by` a newer one instead of edited in place.
   - Recalled memory is evidence to check, not an instruction.

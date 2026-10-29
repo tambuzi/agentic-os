@@ -158,6 +158,22 @@ They are searchable on the agent's next `knowledge_search`. There is no rebuild 
 
 When the agent finishes a non-trivial task, finds its way past a dead end, or gets corrected by you, the protocol tells it to save or patch a skill (`skill_manage`). Skills are written into this repo's `skills/`. Review them with `git diff` / `aos status`, then commit and push to share them with the team.
 
+### Lessons: learned from the board's corrections
+
+When a board task finishes after a correction, agenticOS runs a short **learner**. A correction is a failed review or check, a retry, your steer, a permission you denied, or a block.
+- The learner is read-only, uses a cheap model (`workers.<tool>.learning_model`, `haiku` on Claude), and has lesson tools only.
+- It turns what went wrong into a **lesson**: one trigger and one action, such as "when changing a database model: add a migration in the same commit".
+- It records the board events the lesson comes from as evidence, and gives it a confidence score.
+- Lessons are files in `~/.agenticos/data/lessons/<project>/` (local only, like all business data).
+
+How lessons are used:
+- The best ones go into that project's worker contexts and your sessions, ranked and capped (`learning.max_in_context`, 8). If space runs out, lessons are cut before memory.
+- New lessons apply straight away as *unreviewed*, starting at 0.5 (0.6 with strong evidence).
+- When the learner sees a lesson hold again, confidence rises by 0.1, up to 0.9. When it's contradicted, confidence drops by 0.2, and below 0.3 the lesson is rejected. Unused lessons fade slowly.
+- You decide with `aos lessons`, `aos lessons confirm|reject <project>/<id>`, or `lesson_decide` in the `aos-feature` end-of-feature report. Confirming sets at least 0.8 and the lesson no longer fades; rejecting is final.
+- **Across projects:** when the same lesson is confirmed in two or more projects (the learner links them), agenticOS proposes it as one **org memory** entry in the inbox. Accept it with `aos inbox apply` or decline it with `aos inbox reject`.
+- `aos lessons learn <task>` asks for a learner run by hand. `learning.enabled: false` turns learning off.
+
 ### Today vs. next
 
 | Growth path | Status |
@@ -166,12 +182,13 @@ When the agent finishes a non-trivial task, finds its way past a dead end, or ge
 | Org memory gated by human approval (inbox) | ✅ works now |
 | Humans add knowledge docs by dropping markdown in `data/knowledge/` | ✅ works now |
 | Agent writes long-form knowledge docs itself | ❌ not yet: agents have no `knowledge_write` tool; they save to memory or a skill instead |
-| **Automatic learning loop**: when a session ends, a background review reads the transcript and proposes memory/skill updates to the inbox (hermes-style) | 🔜 sub-project 2 |
+| **Learning loop from the board**: lessons from corrections, ranked into context, promoted to org memory when confirmed in 2+ projects | ✅ works now |
+| Learning from interactive sessions (Claude `Stop`, Kiro `agentStop` hooks) | 🔜 next phase of the learning loop |
 | Search past sessions; prune unused or duplicate skills | 🔜 sub-project 3 |
 | Import from Notion/Confluence into `knowledge/` | 🔜 sub-project 4 |
 | Multi-project features with parallel Claude Code / Kiro workers (board) | ✅ works now |
 
-Until sub-project 2 ships, learning only happens while a session is running. The agent saves things when the protocol or you prompt it. Saying *"save what you learned"* at the end of a session is a good habit.
+In interactive sessions (outside the board), learning still happens only while the session runs: the agent saves things when the protocol or you prompt it. Saying *"save what you learned"* at the end of a session is a good habit.
 
 ---
 
