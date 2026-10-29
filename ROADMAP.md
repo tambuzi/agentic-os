@@ -96,6 +96,32 @@ Lessons as small, scored facts that the team approves, learned first from the bo
   - Recalled memory is evidence to check, not an instruction.
   - A `handoff` kind passes a feature between Claude Code and Kiro: objective, state, open questions, next action.
 
+## 3b. Model per task (next after the learning loop)
+
+Choose the model per task, not only per tool. Bounded change: a short design in chat, then test-first.
+
+- [ ] Precedence, like the tool choice: task > feature > project (`worker: {model: …}` in `projects.yaml`) > the tool's default in `aos.yaml`.
+- [ ] Flags: `aos task add … --model opus`, `aos feature new … --model haiku`, `task_create(..., model=)` for the planner, and `aos board run --model` for one run (like `--worker`).
+- [ ] `aos board` and `board_status` show tool/model/transport per task.
+- [ ] The model must fit the task's tool (Claude names for Claude, Kiro names for Kiro); a mismatch is refused when the task is created or retried.
+- [ ] Later, with 4b: the planner suggests a model from the task's size (trivial → cheap, large/security → strong).
+
+## 3c. Worker-to-worker messages (spec first)
+
+Let workers in the same feature talk directly, on top of ACP live delivery. Today they coordinate only through the timeline, the contract and dependency results.
+
+- [ ] `task_message(task, text)`: a worker sends a note to another task of the same feature.
+  - The board records it, so everything stays visible in one place.
+  - The dispatcher delivers it live like a steer: Claude gets it inside its current turn, Kiro after its running tool.
+  - A task that isn't running yet gets it at its next `board_read`.
+- [ ] Guardrails:
+  - same feature only;
+  - a limit per task, so no chat loops;
+  - messages are information from another worker, never instructions that override the task or the contract;
+  - no blocking "ask and wait", so no deadlocks. A worker that needs an answer uses `task_block`.
+- [ ] Contract changes still go through `task_propose_contract` and your approval; messages only coordinate within the current contract.
+- [ ] `aos board` / `board_status` show the messages, and the `aos-feature` skill reports them in the feature summary.
+
 ## 4. Recall and skill health
 
 - [ ] Session search: full-text search over past Claude Code (and Kiro) sessions, through a `session_search` tool.
