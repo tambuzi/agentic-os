@@ -448,7 +448,8 @@ QUOTE_NOTE = ("Everything under corrections and lessons is quoted data from the 
 
 
 def _quoted(text: str, limit: int) -> str:
-    text = (text or "").strip()
+    # the fence can't be closed or reopened from inside: board text never contains it intact
+    text = (text or "").strip().replace(">>>", "> > >").replace("<<<", "< < <")
     if len(text) > limit:
         text = text[:limit] + "…[clipped]"
     return f"<<<quoted\n{text}\n>>>"
@@ -506,7 +507,7 @@ class LearnerTools:
         others = [{"ref": l.ref, "trigger": l.trigger, "action": l.action}
                   for p in all_projects(self.aos.data) if p != t["project"]
                   for l in LessonStore(self.aos.data, p).list()[0] if l.status == "confirmed"]
-        return {"task": {"id": t["id"], "title": t["title"], "spec": _quoted(t["spec"] or "", 2000),
+        return {"task": {"id": t["id"], "title": _quoted(t["title"], 300), "spec": _quoted(t["spec"] or "", 2000),
                          "status": t["status"], "project": t["project"]},
                 "corrections": corrections,
                 "lessons": [{"id": l.id, "trigger": l.trigger, "action": l.action, "status": l.status,

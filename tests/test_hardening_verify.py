@@ -147,3 +147,15 @@ def test_a_chained_verify_command_runs_every_part(tmp_path, command, ok):
     (tmp_path / "CHANGELOG.md").write_text("- add\n")
     passed, detail = verify_claim({"id": 1}, tmp_path, command, 30)
     assert passed is ok, detail
+
+
+def test_a_timed_out_verify_command_leaves_nothing_running(tmp_path):
+    # review: only /bin/sh was killed; `sleep 3 && touch` went on in the worktree
+    import time
+    from aos.verify import verify_claim
+    __import__("subprocess").run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    passed, detail = verify_claim({"id": 1}, tmp_path, "sleep 7.31 && true", 1)
+    assert not passed and "timed out" in detail
+    time.sleep(0.3)
+    left = __import__("subprocess").run(["pgrep", "-f", "sleep 7.31"], capture_output=True, text=True).stdout
+    assert left.strip() == ""

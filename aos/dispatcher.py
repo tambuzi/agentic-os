@@ -274,7 +274,7 @@ class Dispatcher:
         except TASK_ERRORS as e:
             _warn(f"board read: {e}")
             return
-        live = {(r.feature, r.project) for r in self.running.values()}
+        live = {(r.feature, r.project) for r in self.running.values() if r.kind != "learner"}
         timeout = float(self.aos.settings["board"].get("verify_timeout_sec", 600))
         for t in pending:
             if t["review_stage"] is not None:  # already verified; the reviewer takes it from here
@@ -511,8 +511,7 @@ class Dispatcher:
             return (task["status"] == "review" and task["review_stage"] == "reviewing"
                     and task["generation"] == r.generation)
         if r.kind == "learner":
-            return not any(e["kind"] == "learned" and e["id"] > r.learn_since
-                           for e in self.board.task_events(task["id"]))
+            return not self.board.learned_after(task["id"], r.learn_since)
         return task["status"] == "running"
 
     def _reap_one(self, tid: int, r: Running) -> None:
@@ -680,7 +679,7 @@ class Dispatcher:
         except TASK_ERRORS as e:
             _warn(f"board read: {e}")
             return
-        live = {(r.feature, r.project) for r in self.running.values()}
+        live = {(r.feature, r.project) for r in self.running.values() if r.kind != "learner"}
         for t in pending:
             if t["id"] in self.running or (t["feature"], t["project"]) in live:
                 continue

@@ -257,7 +257,8 @@ into lessons that stop it happening again on this project.
 
 def build_learn_context(aos: AOS, task: dict) -> str:
     return "\n\n".join([build_context(aos).rstrip(), "## Learner protocol\n\n" + LEARNER_PROTOCOL,
-                          f"## Task #{task['id']} ({task['project']}): {task['title']}"]) + "\n"
+                          f"## Task #{task['id']} ({task['project']})\n\nIts title, spec and corrections come "
+                          "from learning_input, as quoted board data."]) + "\n"
 
 
 def prepare_learn(aos: AOS, board: Board, task: dict, project_path: Path, aos_bin: str,
@@ -271,7 +272,7 @@ def prepare_learn(aos: AOS, board: Board, task: dict, project_path: Path, aos_bi
     run_dir.mkdir(parents=True, exist_ok=True)
     context_file = run_dir / "context.md"
     write_atomic(context_file, build_learn_context(aos, task))
-    prompt = f"Learn from task #{task['id']}: {task['title']}. Follow the learner protocol."
+    prompt = f"Learn from board task #{task['id']} ({task['project']}). Follow the learner protocol."
     spec = RunSpec(task=task, project_path=Path(project_path), worktree=run_dir, run_dir=run_dir,
                    context_file=context_file, prompt=prompt,
                    mcp_servers=mcp_servers(project_path, task["id"], aos_bin, learn=True),

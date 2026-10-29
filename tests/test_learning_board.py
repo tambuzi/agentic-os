@@ -120,3 +120,25 @@ def test_request_learning_refuses_cancelled_and_unfinished(b):
     b.cancel(tid)
     with pytest.raises(AosError):
         b.request_learning(tid)
+
+
+def test_events_are_indexed_by_task(b):
+    names = {r["name"] for r in b._rows("PRAGMA index_list(events)")}
+    assert "events_task" in names
+
+
+def test_upgrading_does_not_backfill_old_tasks(b):
+    # review: the first 0.7.0 run would start learners for every historical corrected task
+    tid = start(b)
+    b.steer(tid, "use v2")
+    finish(b, tid)
+    b._rows("DELETE FROM meta WHERE key='learning_since'")     # as if this board predates 0.7.0
+    reopened = Board(b.data)
+    assert reopened.learnable() == []
+    reopened.request_learning(tid)                            # still possible on request
+    assert [t["id"] for t in reopened.learnable()] == [tid]
+    t2 = start(reopened, "new")
+    reopened.steer(t2, "use v3")
+    __import__("time").sleep(1.1)                             # timestamps have 1 s resolution
+    finish(reopened, t2)
+    assert t2 in [t["id"] for t in reopened.learnable()]       # finished after the upgrade

@@ -212,3 +212,19 @@ def test_once_reaps_its_learners(env):
     tid = corrected_task(b)
     Dispatcher(repo, tick=0.05).run(once=True)
     assert learned(b, tid) == ["1 new lesson"]
+
+
+def test_a_learner_does_not_hold_the_worktree(env, monkeypatch):
+    # review: a running learner kept the next task of the same project from starting
+    repo, b, write, tmp_path, data = env
+    write(board_cfg={"verify": True, "review": True}, learning={"learner_timeout_min": 5})
+    monkeypatch.setenv("FAKE_ACP_LEARN", "silent")
+    t1 = corrected_task(b, "first")
+    t2 = b.add_task("checkout", "api", "second", worker="claude")
+    d = Dispatcher(repo, tick=0.05)
+    try:
+        assert wait_for(lambda: t1 in d.running and d.running[t1].kind == "learner", d, timeout=30)
+        assert wait_for(lambda: b.task(t2)["status"] == "done", d, timeout=30)   # verified and reviewed meanwhile
+        assert d.running.get(t1) is not None and d.running[t1].kind == "learner"
+    finally:
+        stop(d)

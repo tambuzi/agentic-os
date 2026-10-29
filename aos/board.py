@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS permissions(
   role TEXT NOT NULL, summary TEXT NOT NULL, raw TEXT, rule TEXT,
   status TEXT NOT NULL DEFAULT 'pending',  -- pending | approved | denied | expired
   always INTEGER NOT NULL DEFAULT 0, requested TEXT NOT NULL, decided TEXT);
+CREATE INDEX IF NOT EXISTS events_task ON events(task, kind);
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 
@@ -107,6 +109,11 @@ class Board:
                            ("transport", "TEXT")):                            # acp | cli (last attempt)
             if name not in cols:  # boards created before the column existed
                 c.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
+        if c.execute("SELECT 1 FROM meta WHERE key='learning_since'").fetchone() is None:
+            # a board that already has work predates the learning loop: don't learn from its history
+            # (only on request); a new board learns from everything
+            old = c.execute("SELECT 1 FROM tasks LIMIT 1").fetchone() is not None
+            c.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('learning_since', ?)", (now() if old else "",))
         return c
 
     @contextmanager
@@ -404,21 +411,30 @@ class Board:
                 out.append(("block", e))
         return [{"kind": k, "event": e["id"], "text": e["body"] or ""} for k, e in out]
 
-    def _wants_learning(self, tid: int) -> bool:
-        events = self.task_events(tid)
-        learned = max((e["id"] for e in events if e["kind"] == "learned"), default=0)
-        requested = max((e["id"] for e in events if e["kind"] == "learn"), default=0)
-        if requested > learned:
-            return True
-        return not learned and bool(self.correction_signals(tid))
+    def learned_after(self, tid: int, since: int) -> bool:
+        return bool(self._rows("SELECT 1 FROM events WHERE task=? AND kind='learned' AND id>? LIMIT 1",
+                               (int(tid), int(since))))
 
     def learnable(self, feature: str | None = None) -> list[dict]:
         """Finished tasks (done/failed) whose corrections haven't been learned from yet, or
-        that the user asked to learn from again (`aos lessons learn`)."""
-        sql, params = "SELECT * FROM tasks WHERE status IN ('done', 'failed')", []
+        that the user asked to learn from again (`aos lessons learn`). Tasks that finished
+        before this board had the learning loop are only learned from on request."""
+        sql = ("SELECT t.*, (SELECT max(id) FROM events e WHERE e.task=t.id AND e.kind='learned') AS _learned, "
+               "(SELECT max(id) FROM events e WHERE e.task=t.id AND e.kind='learn') AS _learn "
+               "FROM tasks t WHERE t.status IN ('done', 'failed')")
+        params: list = []
         if feature:
-            sql, params = sql + " AND feature=?", [feature]
-        return [t for t in self._rows(sql + " ORDER BY id", params) if self._wants_learning(t["id"])]
+            sql, params = sql + " AND t.feature=?", [feature]
+        rows = self._rows(sql + " ORDER BY t.id", params)
+        since = (self._rows("SELECT value FROM meta WHERE key='learning_since'") or [{"value": ""}])[0]["value"]
+        out = []
+        for t in rows:
+            learned, learn = t.pop("_learned") or 0, t.pop("_learn") or 0
+            if learn > learned:
+                out.append(t)
+            elif not learned and not (since and (t["updated"] or "") <= since) and self.correction_signals(t["id"]):
+                out.append(t)
+        return out
 
     def mark_learned(self, tid: int, summary: str, author: str = "learner") -> None:
         with self._tx() as c:

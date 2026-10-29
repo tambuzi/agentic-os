@@ -27,10 +27,12 @@ ACTIVE = ("unreviewed", "confirmed")
 _SECRET = re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S{8,}"
                      r"|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|xox[abp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}"
                      r"|-----BEGIN [A-Z ]*PRIVATE KEY")
-_CODE_LINE = re.compile(r"^(\s{4,}|\t)\S|^\s*(def |class |import |from \S+ import |function |const |let |var )"
-                        r"|[{}].*;|;.*[{}]")
+_CODE_LINE = re.compile(r"^(\s{4,}|\t)\S|^\s*(def|class|function)\s+\w+\s*[(:{]|^\s*from\s+\S+\s+import\s"
+                        r"|[{}].*;|;.*[{}]|=>")
 _DANGEROUS = re.compile(r"(?i)git\s+push|--no-verify|core\.hookspath|\bsudo\b|rm\s+-\w*[rf]"
-                        r"|ignore\s+(all\s+|any\s+)?(previous|prior|above)\s+instructions")
+                        r"|(ignore|disregard|forget|override)\s+(\w+\s+){0,3}(previous|prior|above|earlier|all)\s+"
+                        r"(\w+\s+){0,2}(instructions|rules|messages|prompts?|guidance)"
+                        r"|(ignore|disregard)\s+(the\s+|all\s+|your\s+)?(instructions|rules|system prompt)")
 
 
 class LessonError(AosError):
@@ -119,8 +121,17 @@ def _parse(path: Path, project: str) -> Lesson:
     for k in ("created", "last_seen"):
         kw[k] = str(kw.get(k) or "")
     lesson = Lesson(id=path.stem, project=project, action=m.group(2).strip(), **kw)
-    if lesson.status not in STATUSES or not lesson.trigger or not lesson.last_seen:
-        raise ValueError("missing or invalid trigger/status/last_seen")
+    if lesson.status not in STATUSES or not lesson.last_seen:
+        raise ValueError("missing or invalid status/last_seen")
+    if not isinstance(lesson.trigger, str) or not lesson.trigger.strip():
+        raise ValueError("trigger must be text")
+    if not isinstance(lesson.evidence, list) or not all(isinstance(e, dict) for e in lesson.evidence):
+        raise ValueError("evidence must be a list of mappings")
+    if not isinstance(lesson.same_as, list) or not all(isinstance(s, str) for s in lesson.same_as):
+        raise ValueError("same_as must be a list of <project>/<id>")
+    for name in ("general_rule", "promotion", "promoted_to", "superseded_by", "note"):
+        if getattr(lesson, name) is not None and not isinstance(getattr(lesson, name), str):
+            raise ValueError(f"{name} must be text")
     date.fromisoformat(lesson.last_seen)
     lesson.confidence = float(lesson.confidence)
     return lesson
@@ -225,6 +236,9 @@ class LessonStore:
 
         def apply(l: Lesson):
             _refuse_inactive(l)
+            seen = {(e.get("task"), ev) for e in l.evidence for ev in e.get("events") or []}
+            if all((e.get("task"), ev) in seen for e in evidence for ev in e.get("events") or []):
+                raise LessonError(f"{l.ref} already has this evidence; confirm only with new events")
             l.confidence = min(0.9, l.confidence + 0.1)
             l.last_seen = today.isoformat()
             l.evidence = [*l.evidence, *evidence]

@@ -8,6 +8,8 @@ A `task_complete` is a claim. The dispatcher checks, in the task's worktree:
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 from pathlib import Path
 
@@ -46,6 +48,23 @@ def _tail(text: str, lines: int = 40) -> str:
     return "\n".join(text.strip().splitlines()[-lines:])
 
 
+def _run_group(argv: list[str], cwd, timeout_sec: float) -> subprocess.CompletedProcess:
+    """Run in its own process group; on timeout kill the whole group, so nothing a check
+    started (`a && b`, test servers) keeps running in the worktree."""
+    proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            stdin=subprocess.DEVNULL, start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=timeout_sec)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
 def verify_claim(task: dict, worktree: Path, verify_command: str | list | None,
                  timeout_sec: float = 600) -> tuple[bool, str]:
     """(ok, detail). `detail` explains a rejection well enough for the next attempt to act on."""
@@ -65,8 +84,7 @@ def verify_claim(task: dict, worktree: Path, verify_command: str | list | None,
         argv = ["/bin/sh", "-c", verify_command] if isinstance(verify_command, str) else [str(a) for a in verify_command]
         shown = verify_command if isinstance(verify_command, str) else " ".join(argv)
         try:
-            r = subprocess.run(argv, cwd=worktree, capture_output=True, text=True, timeout=timeout_sec,
-                               stdin=subprocess.DEVNULL)
+            r = _run_group(argv, worktree, timeout_sec)
         except subprocess.TimeoutExpired:
             return False, f"verification command `{shown}` timed out after {timeout_sec:g}s"
         except OSError as e:
