@@ -21,6 +21,7 @@ from .config import load_user_config, repo_root, slug_for_path
 from .core import AOS
 from .errors import AosError
 from .knowledge import KnowledgeIndex
+from . import inbox
 from .board import Board
 from .workers.common import profile_settings, resolve_profile
 
@@ -116,7 +117,7 @@ WORKER_TOOLS = {"task_show", "board_read", "task_comment", "task_block", "task_p
                 "task_create", "task_complete"}
 PLANNER_TOOLS = {"feature_create", "feature_show", "task_create", "board_read", "board_start", "board_status",
                  "task_unblock", "task_retry", "task_cancel", "proposal_decide", "feature_workflow",
-                 "board_wait", "task_steer", "permission_decide"}
+                 "board_wait", "task_steer", "permission_decide", "lessons_list", "lesson_decide"}
 
 
 class BoardTools:
@@ -300,7 +301,37 @@ class BoardTools:
                       if any(t["id"] == k for t in tasks)},
             "pending_proposals": self.board.proposals(feature, "pending"),
             "pending_permissions": self.board.permissions(feature=feature, status="pending"),
+            "lessons": self.lessons_list(feature=feature).get("lessons", []),
+            "pending_promotions": _pending_promotions(self.aos.data),
         }
+
+    @_safe
+    def lessons_list(self, project: str | None = None, feature: str | None = None,
+                     status: str | None = None) -> dict:
+        from .lessons import LessonStore, all_projects
+        out, warnings = [], []
+        for p in [project] if project else all_projects(self.aos.data):
+            found, warn = LessonStore(self.aos.data, p).list()
+            warnings += warn
+            for l in found:
+                features = [e.get("feature") for e in l.evidence]
+                if (status and l.status != status) or (feature and feature not in features):
+                    continue
+                out.append({"ref": l.ref, "trigger": l.trigger, "action": l.action, "status": l.status,
+                            "confidence": l.confidence, "new": bool(features) and features[0] == feature})
+        return {"lessons": out, **({"warnings": warnings} if warnings else {})}
+
+    @_safe
+    def lesson_decide(self, ref: str, confirm: bool) -> dict:
+        """The user's decision on a lesson; confirming may complete an org promotion."""
+        from .lessons import LessonError, LessonStore, stage_promotions
+        project, _, lid = (ref or "").partition("/")
+        if not project or not lid:
+            raise LessonError(f"a lesson ref is <project>/<id>, not {ref!r}")
+        lesson = LessonStore(self.aos.data, project).decide(lid, bool(confirm))
+        promotions = stage_promotions(self.aos) if confirm else []
+        return {"ref": lesson.ref, "status": lesson.status, "confidence": lesson.confidence,
+                "promotions": promotions}
 
     @_safe
     def board_wait(self, feature: str, cursor: dict | str | None = None, timeout_sec: float = 300) -> dict:
@@ -404,6 +435,11 @@ class BoardTools:
         return {"feature": self.board.feature(slug), "brief": self.board.brief(slug),
                 "contract": self.board.contract(slug), "tasks": self.board.tasks(feature=slug),
                 "pending_proposals": self.board.proposals(slug, "pending")}
+
+
+def _pending_promotions(data) -> list[dict]:
+    return [{"proposal": p["id"], "rule": (p.get("args") or {}).get("text"), "lessons": p["args"]["lessons"]}
+            for p in inbox.list_proposals(data) if (p.get("args") or {}).get("lessons")]
 
 
 LEARNER_TOOLS = {"learning_input", "lesson_new", "lesson_confirm", "lesson_contradict", "learning_done"}
@@ -740,6 +776,16 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
         def feature_workflow(feature: str, poll: int = 30) -> dict:
             """Kiro only: write a Kiro workflow (.kiro/workflows/aos-<feature>.workflow.yaml) that runs the feature on the board and asks the user in Kiro when a task needs them."""
             return bt.feature_workflow(feature, poll)
+
+        @mcp.tool()
+        def lessons_list(project: str | None = None, feature: str | None = None, status: str | None = None) -> dict:
+            """Lessons learned from board corrections (filter by project, by the feature they came from, or by status: unreviewed|confirmed|rejected|superseded)."""
+            return bt.lessons_list(project, feature, status)
+
+        @mcp.tool()
+        def lesson_decide(ref: str, confirm: bool) -> dict:
+            """The user's decision on a lesson (<project>/<id>): confirm (it keeps reaching workers, confidence >= 0.8) or reject (final). Confirming may propose an org memory entry through the inbox."""
+            return bt.lesson_decide(ref, confirm)
 
         @mcp.tool()
         def board_status(feature: str) -> dict:

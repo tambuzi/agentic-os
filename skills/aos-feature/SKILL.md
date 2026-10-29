@@ -60,4 +60,8 @@ You run the whole flow in this conversation. The user only steps in for decision
 ## 5. Finish
 12. Report each task's result (first line), anything cancelled, and where the work is: `~/.agenticos/worktrees/<feature>/<project>` on branch `feature/<feature>`. Nothing is pushed; the user reviews and merges.
 13. Offer a review pass. If wanted, add one task per project, depending on that project's tasks: "Review the feature branch against contract v<N>; fix what deviates; report findings". Then go back to step 10.
-14. Save anything durable you learned about the projects with `memory_add` (project scope).
+14. **Lessons learned.** agenticOS learns from the corrections in this feature (failed reviews or checks, retries, the user's steers, denied permissions, blocks). It does this by itself, in short learner runs after tasks finish.
+    - List them under a "Lessons learned this feature" heading, from `board_status(feature).lessons`: each one's trigger, action, confidence and whether it is new.
+    - Ask the user whether to confirm or reject each one with `lesson_decide(ref, confirm)`. Confirmed lessons keep reaching that project's workers and sessions; rejected ones never come back.
+    - If `pending_promotions` lists anything, a lesson now holds in two or more projects and is proposed as org memory. Show the rule and tell the user to accept it with `aos inbox apply <proposal>` or decline it with `aos inbox reject <proposal>`.
+15. Save anything else durable you learned about the projects with `memory_add` (project scope).

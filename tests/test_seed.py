@@ -63,3 +63,8 @@ def test_master_skill_can_steer_running_workers():
 def test_master_skill_relays_permission_requests():
     text = (ROOT / "skills/aos-feature/SKILL.md").read_text()
     assert "permission_decide" in text
+
+
+def test_master_skill_reports_lessons():
+    text = (ROOT / "skills/aos-feature/SKILL.md").read_text()
+    assert "Lessons learned" in text and "lesson_decide" in text and "aos inbox apply" in text
