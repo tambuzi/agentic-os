@@ -8,7 +8,6 @@ A `task_complete` is a claim. The dispatcher checks, in the task's worktree:
 
 from __future__ import annotations
 
-import shlex
 import subprocess
 from pathlib import Path
 
@@ -62,7 +61,8 @@ def verify_claim(task: dict, worktree: Path, verify_command: str | list | None,
                            "feature branch before calling task_complete")
     shown = ""
     if verify_command:
-        argv = shlex.split(verify_command) if isinstance(verify_command, str) else [str(a) for a in verify_command]
+        # a string is a shell command line (the project's own, from projects.yaml): `a && b` must run b too
+        argv = ["/bin/sh", "-c", verify_command] if isinstance(verify_command, str) else [str(a) for a in verify_command]
         shown = verify_command if isinstance(verify_command, str) else " ".join(argv)
         try:
             r = subprocess.run(argv, cwd=worktree, capture_output=True, text=True, timeout=timeout_sec,

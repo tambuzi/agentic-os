@@ -153,6 +153,12 @@ def build_worker_context(aos: AOS, board: Board, task: dict) -> str:
         f"## Contract v{contract['version']}\n\n{contract['text'].strip() or '(no contract yet)'}",
         f"## Your task #{task['id']} ({task['project']}): {task['title']}\n\n{(task['spec'] or '').strip() or '(no spec)'}",
     ]
+    verify = _project_worker(aos, task["project"]).get("verify_command")
+    if verify:
+        shown = verify if isinstance(verify, str) else " ".join(str(v) for v in verify)
+        parts.append(f"## Checks before review\n\nWhen you call task_complete, aos runs `{shown}` in your worktree, "
+                     "and the task only moves on if it passes (exit 0). Run it yourself before task_complete and "
+                     "fix whatever it reports.")
     deps = board.dependency_results(task["id"])
     if deps:
         parts.append("## Results of tasks you depend on\n\n" + "\n\n".join(
@@ -238,8 +244,11 @@ into lessons that stop it happening again on this project.
    the user's guidance, a denied permission, a block).
 3. Prefer lesson_confirm on an existing lesson that already says it; lesson_contradict one that
    turned out wrong here. Use lesson_new only for something not covered.
-4. A lesson is one trigger ("when …") and one action (a sentence), specific to this project. No
-   code, no secrets, no customer data, no generic advice like "write tests".
+4. A lesson is one trigger ("when …") and one action (a sentence), specific to this project.
+   State the project fact behind the correction: the file, convention, command or rule this
+   project requires (e.g. "when adding a function: add a CHANGELOG.md entry for it"),
+   not generic process advice ("run the checks", "read the spec carefully", "write tests").
+   No code, no secrets, no customer data.
 5. If a confirmed lesson of another project (other_projects) states the same rule, pass
    same_as=["<project>/<id>"] and general_rule: the rule without project names.
 6. At most a few changes. Finish with learning_done(summary); "nothing reusable" is a valid

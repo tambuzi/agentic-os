@@ -91,3 +91,23 @@ def test_worker_context_includes_lessons(configured, data, git_repo, tmp_path):
     board.promote()
     task = board.claim(tid)
     assert lesson.trigger in build_worker_context(AOS(configured, slug="shop-api"), board, task)
+
+
+def test_worker_context_names_the_projects_check(configured, data, git_repo, tmp_path):
+    # workers can't pass a check they're never told about
+    proj = git_repo(tmp_path / "shop-api")
+    save_user_config({**load_user_config(), "projects": {"shop-api": {"path": str(proj), "targets": ["claude"]}}})
+    a = aos_for(configured, "shop-api")
+    (a.data / "projects.yaml").write_text(yaml.safe_dump(
+        {"projects": {"shop-api": {"description": "", "worker": {"verify_command": "npm test && npm run lint"}}}}))
+    board = Board(data)
+    board.create_feature("checkout", "Checkout")
+    tid = board.add_task("checkout", "shop-api", "Orders", spec="do it")
+    board.promote()
+    ctx = build_worker_context(AOS(configured, slug="shop-api"), board, board.claim(tid))
+    assert "npm test && npm run lint" in ctx and "before task_complete" in ctx
+
+
+def test_learner_protocol_asks_for_the_project_fact():
+    from aos.workers.common import LEARNER_PROTOCOL
+    assert "project fact" in LEARNER_PROTOCOL and "not generic process advice" in LEARNER_PROTOCOL
