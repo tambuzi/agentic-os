@@ -132,6 +132,9 @@ class Dispatcher:
         board_cfg = self.aos.settings["board"]
         self.board = Board(self.aos.data, board_cfg["max_tasks_per_feature"])
         self.feature = feature
+        if worker:
+            from .workers.common import profile_settings
+            profile_settings(self.aos, worker, "")  # an unknown tool fails here, before any task is touched
         self.worker = worker  # run override: launch every task with this tool
         self.model = model    # run override: launch every task on this model (where it fits the tool)
         self._model_misfits: set[int] = set()
@@ -816,7 +819,10 @@ class Dispatcher:
         that doesn't fit the new tool goes back to auto; a --model that doesn't fit is skipped."""
         from .workers.common import _fits, profile_settings
         tid = t["id"]
-        if self.worker and t["worker"] != self.worker:
+        if self.worker and t["worker"] != self.worker and t.get("resume"):
+            self.board.log_event(tid, "status", f"--worker {self.worker} not applied: a resumed session "
+                                                f"continues with {t['worker']}")
+        elif self.worker and t["worker"] != self.worker:
             self.board.set_worker(tid, self.worker, why=" for this run (aos board run --worker)")
             t = {**t, "worker": self.worker}
             settings = profile_settings(self.aos, self.worker, t["project"])

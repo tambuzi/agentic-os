@@ -440,10 +440,9 @@ def cmd_board(a) -> int:
         return cmd_board_watch(a)
     if a.action == "run":
         from .dispatcher import Dispatcher
-        repo = repo_root()
+        d = Dispatcher(repo_root(), feature=a.feature, parallel=a.parallel, worker=a.worker, model=a.model)
         print("dispatching (Ctrl-C to stop launching; twice to stop workers)" if not a.once else "dispatching once")
-        Dispatcher(repo, feature=a.feature, parallel=a.parallel, worker=a.worker, model=a.model).run(
-            once=a.once, until_done=a.until_done)
+        d.run(once=a.once, until_done=a.until_done)
         return 0
     from .dispatcher import dispatcher_status
     from .workers.common import resolve_model
