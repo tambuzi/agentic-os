@@ -256,8 +256,14 @@ aos task retry 2 --resume --note "rename the button"   # feedback on a finished 
 - **By hand**, most specific first: `aos task add … --model opus` > `aos feature new … --model haiku` > `worker: {model: …}` for a project in `projects.yaml`.
 - **Auto:** when nobody chose one, the task's **size** picks the tool's tier. The `aos-feature` planner sizes every task (`trivial | small | standard | large`), and you can pass `--size` by hand. Claude's default tiers are trivial → `haiku`, small and standard → `sonnet`, large → `opus` (`workers.claude.tiers` in `aos.yaml`). Kiro has no tiers by default, so Kiro's own auto mode decides.
 - Otherwise the tool's default (`workers.<tool>.model`).
-- `aos task retry <id> --model opus` retries a task on a stronger model, and `aos board run --model …` overrides every task for one run.
-- A model that doesn't fit the task's tool is refused. Claude takes `opus`/`sonnet`/`haiku`/`fable` or `claude-…` ids. Kiro takes its own names, or the exact list in `workers.kiro.models` if you set one.
+- `aos task retry <id> --model opus` retries a task on a stronger model, and `--model auto` puts a task back on auto.
+- `aos board run --model …` uses that model for every task in this run only; nothing is stored.
+- Claude takes `opus`/`sonnet`/`haiku`/`fable` or hyphenated ids like `claude-opus-4-1`. Kiro takes its own names, like the dotted `claude-sonnet-4.5`, or the exact list in `workers.kiro.models` if you set one.
+- What happens when a model doesn't fit the task's tool depends on where it came from:
+  - typed in a command or an MCP call: refused;
+  - from a feature or project setting: skipped, and auto decides;
+  - from `board run --model`: skipped for that task, with a note on the timeline;
+  - after `--worker` switches the task's tool: a hand-chosen model goes back to auto, with a note.
 - `aos board` shows `tool/model/transport` per task, e.g. `claude/opus/acp`. `aos task show` also says where the model came from.
 
 **Live sessions (ACP).** Workers and reviewers run as live sessions over the Agent Client Protocol (`workers.<tool>.transport: acp`, the default). If the Claude adapter or Node is missing, that attempt falls back to the CLI and says so on the timeline. A live session gives:

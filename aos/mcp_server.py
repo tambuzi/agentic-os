@@ -160,7 +160,8 @@ class BoardTools:
 
     def _new_task(self, feature: str, project: str, title: str, spec: str, depends_on,
                   model: str | None = None, size: str | None = None) -> dict:
-        from .workers.common import check_model, resolve_model
+        from .workers.common import check_model, clean_model, resolve_model
+        model = clean_model(model) or None
         if project not in self.aos.projects():
             raise AosError(f"unknown project {project!r}", "call project_list; link it with aos link")
         profile = resolve_profile(self.aos, project, feature_worker=self.board.feature(feature).get("worker"))
@@ -241,7 +242,8 @@ class BoardTools:
     @_safe
     def feature_create(self, slug: str, title: str, brief: str = "", contract: str = "",
                        worker: str | None = None, model: str | None = None) -> dict:
-        from .workers.common import check_model, resolve_tool
+        from .workers.common import check_model, clean_model, resolve_tool
+        model = clean_model(model) or None
         if worker:
             profile_settings(self.aos, worker, "")  # validates the tool name
         if model:
@@ -413,8 +415,9 @@ class BoardTools:
 
     @_safe
     def task_retry(self, task: int, note: str = "", model: str | None = None) -> dict:
+        from .workers.common import check_model, clean_model
+        model = clean_model(model)
         if model:
-            from .workers.common import check_model
             t = self.board.task(task)
             check_model(profile_settings(self.aos, t["worker"], t["project"]), t["worker"], model)
         self.board.retry(task, note=note or None, author="human", model=model)

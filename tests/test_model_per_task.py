@@ -152,12 +152,50 @@ def test_board_run_model_override_and_tool_switch(env):
     assert t["worker"] == "kiro" and t["model"] is None        # opus doesn't fit Kiro: reset, with an event
     assert any("model reset" in e["body"] for e in b.task_events(tid))
     d = Dispatcher(aos.repo, model="haiku")
-    t2 = b.add_task("checkout", "api", "b", worker="claude")
-    d._apply_run_overrides(b.task(t2))
-    assert b.task(t2)["model"] == "haiku"
+    t2 = b.add_task("checkout", "api", "b", worker="claude", model="opus")
+    launched = d._run_model(b.task(t2))
+    assert launched["model"] == "haiku"
+    assert b.task(t2)["model"] == "opus"          # review: --model is for this run only, never stored
 
 
 def test_skill_tells_the_planner_to_size_tasks():
     from pathlib import Path
     text = (Path(__file__).resolve().parents[1] / "skills/aos-feature/SKILL.md").read_text()
     assert "size" in text and "trivial" in text and "large" in text and "model" in text
+
+
+def test_fit_check_tells_kiro_and_claude_ids_apart(env):
+    # review: claude-… matched both tools, so a Kiro id could launch Claude and vice versa
+    aos = env[0]
+    claude, kiro = profile_settings(aos, "claude", "api"), profile_settings(aos, "kiro", "api")
+    with pytest.raises(AosError):
+        check_model(claude, "claude", "claude-sonnet-4.5")        # Kiro's dotted style
+    with pytest.raises(AosError):
+        check_model(kiro, "kiro", "claude-opus-4-1-20250805")      # a Claude API id
+    check_model(claude, "claude", "claude-opus-4-1-20250805")
+    check_model(kiro, "kiro", "claude-sonnet-4.5")
+
+
+def test_model_is_stripped_and_auto_clears(env, capsys):
+    aos, b, *_ = env
+    assert run(["task", "add", "checkout", "api", "a", "--model", " opus "], capsys)[0] == 0
+    assert b.task(1)["model"] == "opus"
+    assert run(["task", "add", "checkout", "api", "b", "--model", "auto", "--size", "trivial"], capsys)[0] == 0
+    assert b.task(2)["model"] is None and resolve_model(aos, b.task(2))[0] == "haiku"
+    b.promote()
+    b.claim(1)
+    b.block(1, "x", author="w")
+    assert run(["task", "retry", "1", "--model", "auto"], capsys)[0] == 0
+    assert b.task(1)["model"] is None
+
+
+def test_retry_with_another_worker_resets_a_misfit_model(env, capsys):
+    aos, b, *_ = env
+    tid = b.add_task("checkout", "api", "a", worker="claude", model="opus")
+    b.promote()
+    b.claim(tid)
+    b.block(tid, "x", author="w")
+    assert run(["task", "retry", str(tid), "--worker", "kiro"], capsys)[0] == 0
+    t = b.task(tid)
+    assert t["worker"] == "kiro" and t["model"] is None
+    assert any("model reset" in e["body"] for e in b.task_events(tid))

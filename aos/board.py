@@ -690,7 +690,8 @@ class Board:
             self._transition(c, tid, ("failed", "blocked", "cancelled", "done", "ready"), "todo", author,
                              "retry requested" + (" (resume)" if resume else ""),
                              attempts=0, last_failure=None, note=note, resume=1 if resume else 0,
-                             worker=worker or t["worker"], pid=None, model=model or t["model"])
+                             worker=worker or t["worker"], pid=None,
+                             model=t["model"] if model is None else (model or None))  # "" = back to auto
         self.promote()
 
     def cancel(self, tid: int, author: str = "human") -> None:

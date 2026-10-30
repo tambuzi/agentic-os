@@ -262,6 +262,8 @@ def cmd_feature(a) -> int:
         from .workers.common import check_model, profile_settings, resolve_tool
         if a.worker:
             profile_settings(aos, a.worker, "")  # validates the tool name
+        from .workers.common import clean_model
+        a.model = clean_model(a.model) or None
         if a.model:
             tool = a.worker or resolve_tool(aos, projects[0] if projects else "")[0]
             check_model(profile_settings(aos, tool, ""), tool, a.model)
@@ -336,12 +338,13 @@ def cmd_worker(a) -> int:
 
 
 def cmd_task(a) -> int:
-    from .workers.common import check_model, profile_settings, resolve_model, resolve_profile
+    from .workers.common import _fits, check_model, clean_model, profile_settings, resolve_model, resolve_profile
     aos, board = _board_ctx()
     if a.action == "add":
         _check_projects(aos, [a.project])
         profile = resolve_profile(aos, a.project, a.worker, board.feature(a.feature).get("worker"))
         settings = profile_settings(aos, profile, a.project)
+        a.model = clean_model(a.model) or None
         check_model(settings, profile, a.model)
         spec = Path(a.spec_file).read_text() if a.spec_file else ""
         deps = a.after or []
@@ -369,11 +372,13 @@ def cmd_task(a) -> int:
             else:
                 print("(no log yet)")
     elif a.action == "retry":
-        if a.model:
-            t = board.task(a.id)
-            tool = a.worker or t["worker"]
-            check_model(profile_settings(aos, tool, t["project"]), tool, a.model)
-        board.retry(a.id, note=a.note, worker=a.worker, resume=a.resume, model=a.model)
+        t = board.task(a.id)
+        tool, model = a.worker or t["worker"], clean_model(a.model)
+        settings = profile_settings(aos, tool, t["project"])
+        check_model(settings, tool, model or None)
+        board.retry(a.id, note=a.note, worker=a.worker, resume=a.resume, model=model)
+        if model is None and a.worker and t["model"] and not _fits(settings, tool, t["model"]):
+            board.set_model(a.id, None, author="human", why=f" (model reset: {t['model']} doesn't fit {tool})")
         print(f"task #{a.id} queued again")
     elif a.action in ("approve", "deny"):
         p = board.decide_permission(a.id, a.action == "approve", getattr(a, "always", False))

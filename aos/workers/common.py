@@ -80,6 +80,16 @@ def resolve_profile(aos: AOS, project: str, requested: str | None = None,
 
 
 CLAUDE_ALIASES = ("opus", "sonnet", "haiku", "fable")
+_CLAUDE_ID = re.compile(r"claude-[a-z0-9-]+")            # Claude API ids use hyphens only
+_CLAUDE_API_ID = re.compile(r"claude-[a-z]+-\d+(-\d+)+")  # e.g. claude-opus-4-1-20250805 (not Kiro's 4.5)
+
+
+def clean_model(model: str | None) -> str | None:
+    """None = not given; "" = back to auto ("auto"); otherwise the stripped name."""
+    if model is None:
+        return None
+    m = str(model).strip()
+    return "" if m.lower() in ("", "auto") else m
 
 
 def check_model(settings: dict, tool: str, model: str | None) -> None:
@@ -96,10 +106,11 @@ def check_model(settings: dict, tool: str, model: str | None) -> None:
                            f"see workers.{tool}.models in aos.yaml")
         return
     kind = settings.get("adapter", tool)
-    if kind == "claude" and not (m in CLAUDE_ALIASES or m.startswith("claude-")):
-        raise AosError(f"model {m!r} doesn't fit claude", "use opus, sonnet, haiku, fable or a claude-… model id")
-    if kind == "kiro" and m in CLAUDE_ALIASES:
-        raise AosError(f"model {m!r} is a Claude short name; kiro uses its own model names",
+    if kind == "claude" and not (m in CLAUDE_ALIASES or _CLAUDE_ID.fullmatch(m)):
+        raise AosError(f"model {m!r} doesn't fit claude",
+                       "use opus, sonnet, haiku, fable or a claude-… model id (hyphens, e.g. claude-opus-4-1)")
+    if kind == "kiro" and (m in CLAUDE_ALIASES or _CLAUDE_API_ID.fullmatch(m)):
+        raise AosError(f"model {m!r} is a Claude name; kiro uses its own model names",
                        "e.g. claude-sonnet-4.5, or leave it unset for Kiro's auto")
 
 

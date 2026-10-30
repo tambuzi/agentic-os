@@ -134,6 +134,7 @@ class Dispatcher:
         self.feature = feature
         self.worker = worker  # run override: launch every task with this tool
         self.model = model    # run override: launch every task on this model (where it fits the tool)
+        self._model_misfits: set[int] = set()
         setting = parallel if parallel is not None else board_cfg["parallel"]
         # `auto`: the ceiling is max_parallel; free memory decides each start (see _may_start)
         self.parallel = int(board_cfg.get("max_parallel", 6) if str(setting) == "auto" else setting)
@@ -700,7 +701,7 @@ class Dispatcher:
             project_path = linked_project_path(t["project"])
             wt = worktree_path(self.aos.home, t["feature"], t["project"])
             aos = AOS(self.aos.repo, home=self.aos.home, slug=t["project"], data=self.aos.data)
-            spec, settings = prepare_review(aos, self.board, task, wt, project_path, self.aos_bin)
+            spec, settings = prepare_review(aos, self.board, self._run_model(task), wt, project_path, self.aos_bin)
             mod = adapter(settings["adapter"])
             log_path = self.board.data / "logs" / f"{tid}-review-{task['review_attempts']}.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -790,14 +791,21 @@ class Dispatcher:
             if t.get("model") and not _fits(settings, self.worker, t["model"]):
                 self.board.set_model(tid, None, why=f" (model reset: {t['model']} doesn't fit {self.worker})")
                 t = {**t, "model": None}
-        if self.model and t.get("model") != self.model:
-            if _fits(profile_settings(self.aos, t["worker"], t["project"]), t["worker"], self.model):
-                self.board.set_model(tid, self.model, why=" for this run (aos board run --model)")
-                t = {**t, "model": self.model}
-            else:
-                self.board.log_event(tid, "status", f"--model {self.model} doesn't fit {t['worker']}; kept "
-                                                    f"{t.get('model') or 'auto'}")
         return t
+
+    def _run_model(self, task: dict) -> dict:
+        """`aos board run --model`: this run only, never stored. A model that doesn't fit the
+        task's tool is skipped, noted once per task per run."""
+        from .workers.common import _fits, profile_settings
+        if not self.model or task.get("model") == self.model:
+            return task
+        if _fits(profile_settings(self.aos, task["worker"], task["project"]), task["worker"], self.model):
+            return {**task, "model": self.model}
+        if task["id"] not in self._model_misfits:
+            self._model_misfits.add(task["id"])
+            self.board.log_event(task["id"], "status", f"--model {self.model} doesn't fit {task['worker']}; "
+                                                       f"this run uses {task.get('model') or 'auto'}")
+        return task
 
     def _launch(self, t: dict) -> None:
         tid = t["id"]
@@ -820,7 +828,7 @@ class Dispatcher:
         launch = None
         try:
             aos = AOS(self.aos.repo, home=self.aos.home, slug=t["project"], data=self.aos.data)
-            spec, settings = prepare_run(aos, self.board, task, wt, project_path, self.aos_bin)
+            spec, settings = prepare_run(aos, self.board, self._run_model(task), wt, project_path, self.aos_bin)
             mod = adapter(settings["adapter"])
             log_path = self.board.data / "logs" / f"{tid}-{task['attempts']}.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
