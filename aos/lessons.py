@@ -23,6 +23,7 @@ DOMAINS = ("testing", "api", "database", "security", "style", "workflow", "tooli
 EVIDENCE_KINDS = ("review_fail", "verify_fail", "retry", "steer", "permission_denied", "block", "human")
 TRIGGER_MAX, ACTION_MAX = 120, 300
 ACTIVE = ("unreviewed", "confirmed")
+_ID = re.compile(r"[a-z0-9-]+")
 
 _SECRET = re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S{8,}"
                      r"|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|xox[abp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}"
@@ -144,6 +145,11 @@ def _render(lesson: Lesson) -> str:
 
 class LessonStore:
     def __init__(self, data: str | Path, project: str):
+        from .config import check_slug
+        try:
+            check_slug(project)  # never a path: `..` or `a/b` would leave lessons/
+        except AosError as e:
+            raise LessonError(e.message, e.hint)
         self.data = Path(data)
         self.project = project
         self.dir = _dir(self.data, project)
@@ -152,6 +158,9 @@ class LessonStore:
     def list(self, include_inactive: bool = True) -> tuple[list[Lesson], list[str]]:
         found, warnings = [], []
         for p in sorted(self.dir.glob("*.md")) if self.dir.is_dir() else []:
+            if not _ID.fullmatch(p.stem):  # could never be shown, confirmed or rejected
+                warnings.append(f"lesson file {p} skipped: its name is not a lesson id (a-z, 0-9, '-')")
+                continue
             try:
                 lesson = _parse(p, self.project)
             except Exception as e:  # a hand edit gone wrong must never break context or the board
@@ -163,7 +172,7 @@ class LessonStore:
 
     def get(self, lid: str) -> Lesson:
         p = self.dir / f"{lid}.md"
-        if not re.fullmatch(r"[a-z0-9-]+", lid or "") or not p.is_file():
+        if not _ID.fullmatch(lid or "") or not p.is_file():
             raise LessonError(f"no lesson {self.project}/{lid}")
         try:
             return _parse(p, self.project)
@@ -311,8 +320,9 @@ def _neg_date(iso: str) -> int:
 
 # -- across projects ---------------------------------------------------------------
 def all_projects(data: str | Path) -> list[str]:
+    from .config import SLUG_RE
     root = Path(data) / "lessons"
-    return sorted(p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")) if root.is_dir() else []
+    return sorted(p.name for p in root.iterdir() if p.is_dir() and SLUG_RE.match(p.name)) if root.is_dir() else []
 
 
 def find(data: str | Path, ref: str) -> Lesson | None:
@@ -367,10 +377,10 @@ def decline(data: str | Path, group: list[Lesson]) -> None:
 
 
 def promotion_candidates(data: str | Path) -> list[list[Lesson]]:
-    out, no = [], declined(data)
+    out, no = [], [set(key.split("|")) for key in declined(data)]
     for g in groups(data):
         confirmed = {l.project for l in g if l.status == "confirmed"}
-        if len(confirmed) < 2 or _group_key(g) in no:
+        if len(confirmed) < 2 or any(key <= {l.ref for l in g} for key in no):  # a declined group that grew
             continue
         if any(l.promoted_to or l.promotion for l in g):
             continue
@@ -400,15 +410,17 @@ def stage_promotions(aos) -> list[str]:
     declined for good (see AOS.apply_proposal / reject_proposal)."""
     from . import inbox
     staged = []
-    for group in promotion_candidates(aos.data):
-        refs = [l.ref for l in group]
-        projects = sorted({l.project for l in group if l.status == "confirmed"})
-        pid = inbox.stage(aos.data, "memory", "add", {"scope": "org", "text": _group_rule(group), "lessons": refs},
-                          source="learning", reason=f"lesson confirmed in {len(projects)} projects "
-                                                    f"({', '.join(projects)}): {', '.join(refs)}")
-        for l in group:
-            LessonStore(aos.data, l.project).set_fields(l.id, promotion=pid)
-        staged.append(pid)
+    # the dispatcher and a CLI confirm may stage at once: candidates are read under the lock
+    with locked(Path(aos.data) / "lessons" / ".promotions"):
+        for group in promotion_candidates(aos.data):
+            refs = [l.ref for l in group]
+            projects = sorted({l.project for l in group if l.status == "confirmed"})
+            pid = inbox.stage(aos.data, "memory", "add", {"scope": "org", "text": _group_rule(group), "lessons": refs},
+                              source="learning", reason=f"lesson confirmed in {len(projects)} projects "
+                                                        f"({', '.join(projects)}): {', '.join(refs)}")
+            for l in group:
+                LessonStore(aos.data, l.project).set_fields(l.id, promotion=pid)
+            staged.append(pid)
     return staged
 
 
@@ -416,7 +428,7 @@ def settle_promotion(data: str | Path, refs: list[str], applied: bool) -> None:
     """The user decided an org promotion in the inbox."""
     group = [l for l in (find(data, r) for r in refs) if l is not None]
     for l in group:
-        fields = {"promotion": None, **({"promoted_to": "org"} if applied else {})}
+        fields = {"promotion": None, **({"promoted_to": "org"} if applied and l.status == "confirmed" else {})}
         LessonStore(data, l.project).set_fields(l.id, **fields)
     if not applied and group:
         decline(data, group)

@@ -217,3 +217,25 @@ def test_more_injection_phrasings_are_refused(text):
                                   "const values belong in settings.py"])
 def test_plain_sentences_starting_with_code_words_pass(text):
     assert lessons.validate_text(text, 300, "action") == text
+
+
+@pytest.mark.parametrize("project", ["..", "a/b", "../api", "", "API"])
+def test_project_names_are_checked(tmp_path, project):
+    with pytest.raises(LessonError, match="invalid project"):
+        LessonStore(tmp_path, project)
+    assert lessons.find(tmp_path, f"{project}/x") is None
+
+
+def test_other_dirs_under_lessons_are_not_projects(api, tmp_path):
+    new(api)
+    (tmp_path / "lessons" / "Not A Project").mkdir()
+    assert lessons.all_projects(tmp_path) == ["api"]
+
+
+def test_a_file_whose_name_is_no_lesson_id_is_a_warning(api, tmp_path):
+    good = new(api)
+    (api.dir / f"{good.id}.md").rename(api.dir / "My_Lesson.md")
+    new(api, trigger="when adding an endpoint", action="Document it in the API guide.")
+    found, warnings = api.list()
+    assert "My_Lesson" not in [l.id for l in found] and len(found) == 1
+    assert len(warnings) == 1 and "My_Lesson.md" in warnings[0]

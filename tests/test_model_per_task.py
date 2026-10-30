@@ -199,3 +199,27 @@ def test_retry_with_another_worker_resets_a_misfit_model(env, capsys):
     t = b.task(tid)
     assert t["worker"] == "kiro" and t["model"] is None
     assert any("model reset" in e["body"] for e in b.task_events(tid))
+
+
+def test_board_run_rejects_an_unknown_worker(env, capsys):
+    from aos.dispatcher import Dispatcher
+    aos, b, *_ = env
+    tid = b.add_task("checkout", "api", "a", worker="claude")
+    with pytest.raises(AosError, match="unknown worker profile 'foo'"):
+        Dispatcher(aos.repo, worker="foo")
+    code, out, err = run(["board", "run", "--once", "--worker", "foo"], capsys)
+    assert code == 1 and "unknown worker profile" in err and "dispatching" not in out
+    assert b.task(tid)["worker"] == "claude"
+
+
+def test_board_run_worker_keeps_the_tool_of_a_resumed_task(env):
+    from aos.dispatcher import Dispatcher
+    aos, b, *_ = env
+    tid = b.add_task("checkout", "api", "a", worker="claude")
+    b.promote()
+    b.claim(tid)
+    b.block(tid, "x", author="w")
+    b.retry(tid, resume=True)
+    t = Dispatcher(aos.repo, worker="kiro")._apply_run_overrides(b.task(tid))
+    assert t["worker"] == "claude" and b.task(tid)["worker"] == "claude"
+    assert any("resume" in e["body"] and "kiro" in e["body"] for e in b.task_events(tid))

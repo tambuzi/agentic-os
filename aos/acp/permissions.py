@@ -153,7 +153,7 @@ def decide(call: dict, allowed: list[str], worktree: str | Path) -> Decision:
     if kind in _HARMLESS_KINDS:
         return Decision("allow", f"{kind}")
 
-    mcp = _mcp_server(name)
+    mcp = None if kind == "execute" or _command(call) else _mcp_server(name)  # `scripts/x.sh` is no MCP tool
     if mcp:
         server, tool = mcp
         ok = f"mcp:{server}" in allowed

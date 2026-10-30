@@ -82,3 +82,19 @@ def test_feature_budget_stops_new_tasks(env, monkeypatch):
     Dispatcher(repo, tick=0.05).run(once=True)
     assert b.task(a)["status"] == "done" and b.task(c)["status"] == "blocked"
     assert any("feature budget" in e["body"] for e in b.events("checkout") if e["kind"] == "blocker")
+
+
+def test_kiro_credits_are_shown(env, capsys):
+    from aos.cli import main
+    repo, b, write = env
+    write({"review": False})
+    t = b.add_task("checkout", "api", "a", worker="fake")
+    b.add_cost(t, 1.5, unit="credit")
+    b.add_cost(t, 0.25)
+    st = BoardTools(AOS(repo)).board_status("checkout")
+    assert st["cost_credits"] == pytest.approx(1.5) and st["tasks"][0]["cost_credits"] == pytest.approx(1.5)
+    assert st["cost_usd"] == pytest.approx(0.25)
+    main(["board"])
+    feature_line, task_line = capsys.readouterr().out.splitlines()[1:3]
+    assert "$0.25" in feature_line and "1.50 credits" in feature_line
+    assert "$0.25" in task_line and "1.50 credits" in task_line

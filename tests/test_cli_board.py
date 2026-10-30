@@ -142,3 +142,15 @@ def test_feature_workflow_command(env, capsys, tmp_path):
     assert code == 0 and str(path) in out
     assert _yaml.safe_load(path.read_text())["steps"][1]["branches"][0]["id"] == "task-1"
     assert run(["feature", "workflow", "checkout", "--poll", "5", "--out", str(tmp_path)], capsys)[0] == 1
+
+
+def test_board_tool_column_fits_long_model_ids(env, capsys):
+    _, board = env
+    board.create_feature("checkout", "Checkout")
+    long_id = "claude-sonnet-4-5-20250929-with-a-long-suffix"
+    board.add_task("checkout", "api", "first", worker="fake", model=long_id)
+    board.add_task("checkout", "web", "second", worker="fake")
+    out = run(["board"], capsys)[1]
+    rows = [l for l in out.splitlines() if l.startswith("  #")]
+    assert f"fake/{long_id}/-" in rows[0]
+    assert rows[0].index("0/2") == rows[1].index("0/2")  # the columns after it still line up

@@ -64,6 +64,19 @@ def test_apply_promotes(aos, capsys):
     assert lessons.stage_promotions(aos) == []
 
 
+def test_apply_marks_only_confirmed_lessons_promoted(aos, capsys):
+    api, a, web, w = linked(aos)
+    api.decide(a.id, True)
+    billing = LessonStore(aos.data, "billing")
+    b = billing.new("when adding a table", "Add a migration in billing.", "database", EV,
+                    same_as=[f"web/{w.id}"], general_rule="Ship a migration with every new table.")
+    [pid] = lessons.stage_promotions(aos)
+    assert billing.get(b.id).promotion == pid
+    assert main(["inbox", "apply", pid]) == 0
+    assert api.get(a.id).promoted_to == "org" and web.get(w.id).promoted_to == "org"
+    assert billing.get(b.id).promoted_to is None and billing.get(b.id).promotion is None
+
+
 def test_reject_declines_for_good(aos, capsys):
     api, a, web, w = linked(aos)
     api.decide(a.id, True)
@@ -72,3 +85,37 @@ def test_reject_declines_for_good(aos, capsys):
     assert api.get(a.id).promotion is None and api.get(a.id).promoted_to is None
     assert lessons.stage_promotions(aos) == []
     assert aos.memory("org").entries() == []
+
+
+def test_a_declined_group_stays_declined_when_a_project_joins(aos, capsys):
+    api, a, web, w = linked(aos)
+    api.decide(a.id, True)
+    [pid] = lessons.stage_promotions(aos)
+    assert main(["inbox", "reject", pid]) == 0
+    billing = LessonStore(aos.data, "billing")
+    b = billing.new("when adding a table", "Add a migration in billing.", "database", EV,
+                    same_as=[f"web/{w.id}"], general_rule="Ship a migration with every new table.")
+    billing.decide(b.id, True)
+    assert len(lessons.groups(aos.data)[0]) == 3
+    assert lessons.stage_promotions(aos) == []
+
+
+def test_concurrent_staging_proposes_once(aos, monkeypatch):
+    import threading
+    import time
+    api, a, web, w = linked(aos)
+    api.decide(a.id, True)
+    real = inbox.stage
+
+    def slow(*args, **kw):
+        time.sleep(0.3)  # both callers have read the candidates before either marks the lessons
+        return real(*args, **kw)
+    monkeypatch.setattr(inbox, "stage", slow)
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(lessons.stage_promotions(aos))) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(len(r) for r in results) == [0, 1]
+    assert len(inbox.list_proposals(aos.data)) == 1

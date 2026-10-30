@@ -132,6 +132,9 @@ class Dispatcher:
         board_cfg = self.aos.settings["board"]
         self.board = Board(self.aos.data, board_cfg["max_tasks_per_feature"])
         self.feature = feature
+        if worker:
+            from .workers.common import profile_settings
+            profile_settings(self.aos, worker, "")  # an unknown tool fails here, before any task is touched
         self.worker = worker  # run override: launch every task with this tool
         self.model = model    # run override: launch every task on this model (where it fits the tool)
         self._model_misfits: set[int] = set()
@@ -194,6 +197,18 @@ class Dispatcher:
                 self.board.attempt_failed(t["id"], "dispatcher restarted; previous worker abandoned")
             except TASK_ERRORS as e:
                 _warn(f"recover task #{t['id']}: {e}")
+        # reviewers and learners record no pid: they can't be stopped, only made stale (a new
+        # review gets a new generation; a learner's run ends at its `learned` event)
+        for t in self.board.reviewable():
+            if t["review_stage"] != "reviewing":
+                continue
+            self._remove_kiro_agent(t)
+            try:
+                self.board.review_unfinished(t["id"], "dispatcher restarted; previous reviewer abandoned")
+            except TASK_ERRORS as e:
+                _warn(f"recover task #{t['id']}: {e}")
+        for t in self.board.learnable():
+            self._remove_kiro_agent(t)
 
     def _remove_kiro_agent(self, t: dict) -> None:
         """A crashed dispatcher never ran cleanup: drop the task's per-run Kiro agent file."""
@@ -465,9 +480,11 @@ class Dispatcher:
                         r.allowed = [*(r.allowed or []), rule]
                     self._answer_permission(r, req_id, options, "allow")  # never the agent's own "always"
                 elif p["status"] in ("denied", "expired"):
+                    r.acp.conn.last_activity = time.monotonic()
                     self._answer_permission(r, req_id, options, "reject")
                 elif time.monotonic() - asked > timeout:
                     self.board.expire_permission(pid, "no answer in time")
+                    r.acp.conn.last_activity = time.monotonic()
                     self._answer_permission(r, req_id, options, "reject")
                 else:
                     continue
@@ -802,7 +819,10 @@ class Dispatcher:
         that doesn't fit the new tool goes back to auto; a --model that doesn't fit is skipped."""
         from .workers.common import _fits, profile_settings
         tid = t["id"]
-        if self.worker and t["worker"] != self.worker:
+        if self.worker and t["worker"] != self.worker and t.get("resume"):
+            self.board.log_event(tid, "status", f"--worker {self.worker} not applied: a resumed session "
+                                                f"continues with {t['worker']}")
+        elif self.worker and t["worker"] != self.worker:
             self.board.set_worker(tid, self.worker, why=" for this run (aos board run --worker)")
             t = {**t, "worker": self.worker}
             settings = profile_settings(self.aos, self.worker, t["project"])

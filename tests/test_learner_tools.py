@@ -61,6 +61,19 @@ def test_new_confirm_contradict_through_tools(env):
     assert lt.lesson_contradict(r["id"], ev, "the reviewer accepted it without one")["confidence"] == 0.4
 
 
+def test_automatic_rejection_is_on_the_timeline(env):
+    aos, b, tid, signals = env
+    lt = tools(env)
+    ev = [signals[0]["event"]]
+    r = lt.lesson_new("when adding a table", "Add a migration for every new table.", "database", ev)
+    assert lt.lesson_contradict(r["id"], ev, "not needed here")["status"] == "unreviewed"   # 0.3
+    assert not any("rejected" in (e["body"] or "") and r["id"] in (e["body"] or "") for e in b.task_events(tid))
+    assert lt.lesson_contradict(r["id"], ev, "migrations are generated here")["status"] == "rejected"
+    [e] = [e for e in b.task_events(tid) if r["id"] in (e["body"] or "")]
+    assert f"api/{r['id']}" in e["body"] and "rejected automatically" in e["body"]
+    assert "migrations are generated here" in e["body"] and e["author"] == f"learner:{tid}"
+
+
 def test_evidence_must_belong_to_the_task(env):
     r = tools(env).lesson_new("when adding a table", "Add a migration.", "database", [999999])
     assert r["ok"] is False and "999999" in r["error"]

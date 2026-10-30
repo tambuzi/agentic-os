@@ -25,6 +25,14 @@ def test_context_never_fails(home, tmp_path, capsys):
     assert out.startswith("[aos]") and len(out.strip().splitlines()) == 1
 
 
+def test_context_error_is_one_line_for_a_yaml_parse_error(configured, project, capsys, monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda n: None)
+    assert run(["link", str(project), "--name", "shop", "--no-graphskill"], capsys)[0] == 0
+    (configured / "aos.yaml").write_text("board:\n  parallel: [1,\n  other: x\n")
+    code, out, _ = run(["context", "--project", str(project)], capsys)
+    assert code == 0 and out.startswith("[aos]") and len(out.strip().splitlines()) == 1, out
+
+
 def test_context_unlinked(configured, project, capsys):
     code, out, _ = run(["context", "--project", str(project)], capsys)
     assert code == 0 and "not linked" in out
@@ -57,6 +65,22 @@ def test_bad_targets(configured, project, capsys):
 def test_doctor(configured, capsys):
     code, out, _ = run(["doctor"], capsys)
     assert code == 0 and "repo" in out
+
+
+def test_doctor_checks_configured_models_fit_their_tool(configured, capsys):
+    (configured / "aos.yaml").write_text(
+        "workers:\n"
+        "  claude: {model: gpt-5, tiers: {large: claude-sonnet-4.5}}\n"
+        "  kiro: {tiers: {small: haiku}}\n")
+    code, out, _ = run(["doctor"], capsys)
+    lines = out.splitlines()
+    claude = next(l for l in lines if l.startswith("warn  models claude"))
+    assert "gpt-5 (model)" in claude and "claude-sonnet-4.5 (tiers.large)" in claude
+    kiro = next(l for l in lines if l.startswith("warn  models kiro"))
+    assert "haiku (tiers.small)" in kiro
+    (configured / "aos.yaml").write_text("workers:\n  claude: {model: sonnet}\n")
+    out = run(["doctor"], capsys)[1]
+    assert "ok    models claude" in out and "ok    models kiro" in out
 
 
 def test_init_rejects_data_dir_inside_repo(repo, home, capsys):

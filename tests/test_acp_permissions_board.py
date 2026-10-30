@@ -149,3 +149,39 @@ def test_an_approved_command_is_not_asked_again_in_the_same_attempt(env, monkeyp
     finally:
         for r in list(d.running.values()):
             d._terminate(r)
+
+
+@pytest.mark.parametrize("how", ["deny", "timeout"])
+def test_a_refused_permission_resets_the_stall_clock(env, how):
+    repo, b, t, tmp_path = env
+    d = Dispatcher(repo, tick=0.05)
+    try:
+        assert wait_for(lambda: pending(b), d)
+        [pid] = d.pending_perms
+        r = d.running[t]
+        r.acp.conn.last_activity = time.monotonic() - 3600  # a long wait for the user
+        if how == "deny":
+            b.decide_permission(pid, approve=False)
+        else:
+            entry = d.pending_perms[pid]
+            d.pending_perms[pid] = (*entry[:5], time.monotonic() - 10**6)
+        d._resolve_permissions()
+        assert pid not in d.pending_perms
+        assert time.monotonic() - r.acp.conn.last_activity < 60
+    finally:
+        for r in list(d.running.values()):
+            d._terminate(r)
+
+
+def test_always_without_a_rule_says_it_was_allowed_once(env, capsys):
+    repo, b, t, _ = env
+    p = b.request_permission(t, "fetch https://example.com", rule=None)
+    capsys.readouterr()
+    assert main(["task", "approve", str(p), "--always"]) == 0
+    out = capsys.readouterr().out
+    assert "(always)" not in out and "once" in out and "no reusable rule" in out
+    assert b.permission(p)["always"] == 0
+    assert not any("(always)" in e["body"] for e in b.task_events(t))
+    q = b.request_permission(t, "edit files (no path given)", rule=None)
+    r = BoardTools(AOS(repo)).permission_decide(q, approve=True, always=True)
+    assert r["status"] == "approved" and "no reusable rule" in r["message"]

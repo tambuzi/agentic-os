@@ -56,9 +56,14 @@ class AcpConnection:
     def __init__(self, argv: list[str], env: dict | None = None, cwd: str | Path | None = None,
                  log_path: str | Path | None = None):
         self._log = open(log_path, "ab") if log_path else None
-        self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=self._log or subprocess.DEVNULL, env=env, cwd=cwd,
-                                     start_new_session=True)
+        try:
+            self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=self._log or subprocess.DEVNULL, env=env, cwd=cwd,
+                                         start_new_session=True)
+        except BaseException:
+            if self._log:
+                self._log.close()
+            raise
         self.events: Queue = Queue()  # ("notification", method, params) | ("request", id, method, params)
         self.last_activity = time.monotonic()
         self._pending: dict[int, Pending] = {}

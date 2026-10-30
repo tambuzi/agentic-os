@@ -121,6 +121,11 @@ PLANNER_TOOLS = {"feature_create", "feature_show", "task_create", "board_read", 
                  "board_wait", "task_steer", "permission_decide", "lessons_list", "lesson_decide"}
 
 
+def _credits(spent: float) -> dict:
+    """Kiro's cost, in credits, only where some was spent."""
+    return {"cost_credits": round(spent, 4)} if spent else {}
+
+
 class BoardTools:
     """Board access over MCP. With task_id: a worker's tools for its own task.
     Without: planner tools for creating features and tasks."""
@@ -310,10 +315,12 @@ class BoardTools:
             "dispatcher": dispatcher_status(self.board.data),
             "counts": counts,
             "cost_usd": round(self.board.feature_cost(feature), 4),
+            **_credits(self.board.feature_cost(feature, "credit")),
             "tasks": [{"id": t["id"], "project": t["project"], "title": t["title"], "status": t["status"],
                        "worker": t["worker"], "transport": t.get("transport"), "attempts": t["attempts"],
                        "size": t.get("size"), **dict(zip(("model", "model_source"), resolve_model(self.aos, t))),
                        "cost_usd": round(self.board.task_cost(t["id"]), 4),
+                       **_credits(self.board.task_cost(t["id"], "credit")),
                        "result": (t["result"] or "").splitlines()[0] if t["result"] else None} for t in tasks],
             "blocked": [{"task": t["id"], "project": t["project"], "reason": blockers.get(t["id"], "")}
                         for t in tasks if t["status"] == "blocked"],
@@ -407,8 +414,9 @@ class BoardTools:
     @_safe
     def permission_decide(self, permission: int, approve: bool, always: bool = False) -> dict:
         p = self.board.decide_permission(permission, approve, always, author="human")
-        return {"permission": p["id"], "status": p["status"],
-                "message": "the waiting worker gets the answer at the dispatcher's next tick"}
+        once = " Allowed once: this request has no reusable rule." if always and approve and not p["always"] else ""
+        return {"permission": p["id"], "status": p["status"], "always": bool(p["always"]),
+                "message": "the waiting worker gets the answer at the dispatcher's next tick." + once}
 
     @_safe
     def task_steer(self, task: int, message: str, now: bool = False) -> dict:
@@ -550,7 +558,13 @@ class LearnerTools:
                                                          general_rule))
 
     def lesson_contradict(self, id: str, evidence_events: list[int], why: str) -> dict:
-        return self._write(lambda: self._store().contradict(id, self._evidence(evidence_events), why))
+        r = self._write(lambda: self._store().contradict(id, self._evidence(evidence_events), why))
+        if r.get("ok") and r["status"] == "rejected":  # the store has no board: the timeline is noted here
+            self.board.log_event(self.task["id"], "status",
+                                 f"lesson {self.task['project']}/{r['id']} rejected automatically "
+                                 f"(confidence {r['confidence']:g}): {' '.join(str(why).split())[:300]}",
+                                 author=f"learner:{self.task['id']}")
+        return r
 
     def learning_done(self, summary: str) -> dict:
         if self.done:

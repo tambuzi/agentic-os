@@ -75,6 +75,10 @@ def cmd_sync(a) -> int:
     return 0
 
 
+def _one_line(e: Exception) -> str:
+    return " ".join((e.message if isinstance(e, AosError) else str(e)).split())  # YAML errors span lines
+
+
 def cmd_context(a) -> int:
     """SessionStart hook. Must never fail or print more than one line on error."""
     try:
@@ -90,10 +94,10 @@ def cmd_context(a) -> int:
         try:
             sync(a.project)
         except Exception as e:
-            sync_note = f"[aos] skill sync skipped: {e}\n"
+            sync_note = f"[aos] skill sync skipped: {_one_line(e)}\n"
         sys.stdout.write(sync_note + build_context(AOS(repo, slug=slug)))
     except Exception as e:
-        print(f"[aos] context unavailable: {e}")
+        print(f"[aos] context unavailable: {_one_line(e)}")
     return 0
 
 
@@ -182,6 +186,7 @@ def cmd_doctor(a) -> int:
          else "node not found (needed only for Claude over ACP)")
     for name in ("claude", "kiro"):
         line(*acp_tools.status(name, profile_settings(aos, name, ""), aos_home()))
+    _doctor_models(aos, line)
     from . import lessons as L
     count, projects = 0, L.all_projects(aos.data)
     for p in projects:
@@ -191,6 +196,22 @@ def cmd_doctor(a) -> int:
             line(False, w)
     line(True, f"lessons: {count} in {len(projects)} project{'s' if len(projects) != 1 else ''}")
     return 0
+
+
+def _doctor_models(aos: AOS, line) -> None:
+    """One line per tool: do the models configured in aos.yaml fit it?"""
+    from .workers.common import _fits, profile_settings
+    for name in sorted(n for n in aos.settings["workers"] if n != "common"):
+        try:
+            s = profile_settings(aos, name, "")
+        except AosError as e:
+            line(False, f"models {name}: {e.message}")
+            continue
+        configured = [(s.get(k), k) for k in ("model", "learning_model")]
+        configured += [(m, f"tiers.{size}") for size, m in (s.get("tiers") or {}).items()]
+        bad = [f"{m} ({where})" for m, where in configured if m and not _fits(s, name, m)]
+        line(not bad, f"models {name}: " + (f"don't fit {name}: {', '.join(bad)} (see workers.{name} in aos.yaml)"
+                                            if bad else "fit"))
 
 
 def cmd_lessons(a) -> int:
@@ -382,8 +403,11 @@ def cmd_task(a) -> int:
             board.set_model(a.id, None, author="human", why=f" (model reset: {t['model']} doesn't fit {tool})")
         print(f"task #{a.id} queued again")
     elif a.action in ("approve", "deny"):
-        p = board.decide_permission(a.id, a.action == "approve", getattr(a, "always", False))
-        print(f"permission #{p['id']} {p['status']}{' (always)' if p['always'] else ''}: {p['summary']}")
+        always = getattr(a, "always", False)
+        p = board.decide_permission(a.id, a.action == "approve", always)
+        how = (" (always)" if p["always"] else " once (no reusable rule for this request)"
+               if always and p["status"] == "approved" else "")
+        print(f"permission #{p['id']} {p['status']}{how}: {p['summary']}")
     elif a.action == "steer":
         board.steer(a.id, a.message, now=a.now)
         print(f"task #{a.id}: message sent; a live worker gets it right away, others at their next board_read")
@@ -435,15 +459,18 @@ def cmd_board_watch(a) -> int:
     return 0
 
 
+def _cost_text(usd: float, credits: float) -> str:
+    return ", ".join([f"${usd:.2f}"] * bool(usd) + [f"{credits:.2f} credits"] * bool(credits))
+
+
 def cmd_board(a) -> int:
     if a.action == "watch":
         return cmd_board_watch(a)
     if a.action == "run":
         from .dispatcher import Dispatcher
-        repo = repo_root()
+        d = Dispatcher(repo_root(), feature=a.feature, parallel=a.parallel, worker=a.worker, model=a.model)
         print("dispatching (Ctrl-C to stop launching; twice to stop workers)" if not a.once else "dispatching once")
-        Dispatcher(repo, feature=a.feature, parallel=a.parallel, worker=a.worker, model=a.model).run(
-            once=a.once, until_done=a.until_done)
+        d.run(once=a.once, until_done=a.until_done)
         return 0
     from .dispatcher import dispatcher_status
     from .workers.common import resolve_model
@@ -455,20 +482,24 @@ def cmd_board(a) -> int:
     for f in board.features():
         if a.feature and f["slug"] != a.feature:
             continue
-        spent = board.feature_cost(f["slug"])
+        spent = _cost_text(board.feature_cost(f["slug"]), board.feature_cost(f["slug"], "credit"))
         print(f"{f['slug']} [{f['status']}] contract v{f['contract_version']}: {f['title']}"
-              + (f"  (${spent:.2f})" if spent else ""))
-        for t in board.tasks(feature=f["slug"]):
+              + (f"  ({spent})" if spent else ""))
+        tasks = board.tasks(feature=f["slug"])
+        tools = {t["id"]: f"{t['worker']}/{resolve_model(aos, t)[0] or 'auto'}/{t.get('transport') or '-'}"
+                 for t in tasks}
+        width = max([18, *map(len, tools.values())])
+        for t in tasks:
             extra = ""
             if t["id"] in stuck:
                 extra = "  waiting on failed/cancelled " + ", ".join(f"#{d}" for d in stuck[t["id"]])
             elif t["status"] == "blocked":
                 blk = [e for e in board.events(f["slug"]) if e["task"] == t["id"] and e["kind"] == "blocker"]
                 extra = f"  {blk[-1]['body'][:80]}" if blk else ""
-            cost = board.task_cost(t["id"])
-            tool = f"{t['worker']}/{resolve_model(aos, t)[0] or 'auto'}/{t.get('transport') or '-'}"
-            print(f"  #{t['id']:<4} {t['project']:<14} {t['status']:<10} {tool:<18} {t['attempts']}/{t['max_attempts']}"
-                  f"{f'  ${cost:.2f}' if cost else ''}  {t['title']}{extra}")
+            cost = _cost_text(board.task_cost(t["id"]), board.task_cost(t["id"], "credit"))
+            print(f"  #{t['id']:<4} {t['project']:<14} {t['status']:<10} {tools[t['id']]:<{width}} "
+                  f"{t['attempts']}/{t['max_attempts']}"
+                  f"{f'  {cost}' if cost else ''}  {t['title']}{extra}")
         for p in board.permissions(feature=f["slug"], status="pending"):
             print(f"  permission #{p['id']} for #{p['task']}: {p['summary']}  "
                   f"(aos task approve {p['id']} [--always] | aos task deny {p['id']})")

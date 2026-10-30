@@ -80,3 +80,18 @@ def test_protocol_traffic_goes_to_the_log(conn, tmp_path):
     lines = (tmp_path / "agent.log").read_text().splitlines()
     assert any(l.startswith("> ") and '"initialize"' in l for l in lines)
     assert any(l.startswith("< ") and "protocolVersion" in l for l in lines)
+
+
+def test_log_is_closed_when_the_agent_cannot_start(tmp_path, monkeypatch):
+    import builtins
+    opened = []
+    real_open = builtins.open
+
+    def spy(*a, **k):
+        fh = real_open(*a, **k)
+        opened.append(fh)
+        return fh
+    monkeypatch.setattr(builtins, "open", spy)
+    with pytest.raises(OSError):
+        AcpConnection([str(tmp_path / "no-such-agent")], log_path=tmp_path / "agent.log")
+    assert opened and all(fh.closed for fh in opened)

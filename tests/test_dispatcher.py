@@ -153,6 +153,42 @@ def test_recover_marks_orphans(env):
     assert any("restarted" in e["body"] for e in board.events("checkout"))
 
 
+def _reviewing(board, t):
+    board.promote()
+    board.claim(t)
+    board.complete(t, "did it", "worker", to="review")
+    board.mark_verified(t, "checks passed")
+    return board.start_review(t)
+
+
+def test_recover_retries_an_abandoned_review(env):
+    repo, board, _, _ = env
+    t = add(board, "api")
+    _reviewing(board, t)
+    Dispatcher(repo, tick=0.05).recover()
+    task = board.task(t)
+    assert task["status"] == "review" and task["review_stage"] == "verified"
+    assert any("restarted" in e["body"] for e in board.task_events(t))
+
+
+def test_recover_removes_stale_kiro_agent_of_reviewer_and_learner(kiro_env):
+    repo, board, agents, _ = kiro_env
+    r = board.add_task("checkout", "api", "k", worker="fakekiro")
+    _reviewing(board, r)
+    learn = board.add_task("checkout", "web", "k", worker="fakekiro")
+    board.promote()
+    board.claim(learn)
+    board.complete(learn, "did it", "worker")
+    board.request_learning(learn)
+    agents.mkdir(parents=True, exist_ok=True)
+    stale = [agents / f"aos-checkout-t{t}.json" for t in (r, learn)]
+    for f in stale:
+        f.write_text("{}")
+    Dispatcher(repo, tick=0.05).recover()
+    assert not any(f.exists() for f in stale)
+    assert board.learnable("checkout")[0]["id"] == learn  # the learner simply runs again
+
+
 def test_single_dispatcher_lock(env):
     repo, _, _, _ = env
     d1 = Dispatcher(repo, tick=0.05)
