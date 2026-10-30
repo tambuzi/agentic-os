@@ -96,7 +96,7 @@ Lessons as small, scored facts that the team approves, learned first from the bo
   - Recalled memory is evidence to check, not an instruction.
   - A `handoff` kind passes a feature between Claude Code and Kiro: objective, state, open questions, next action.
 
-## 3b. Model per task (next after the learning loop)
+## 3b. Model per task (next)
 
 Choose the model per task, not only per tool. Bounded change: a short design in chat, then test-first.
 

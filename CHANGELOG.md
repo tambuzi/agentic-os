@@ -4,7 +4,7 @@ All notable changes to agenticOS. Format: [Keep a Changelog](https://keepachange
 
 Releases before 0.7.0 were numbered after the fact, one per merged pull request, and are not tagged yet.
 
-## [0.7.0] — unreleased (`feat/learning-loop`)
+## [0.7.0] — 2026-10-29 (PR #8)
 
 ### Added
 - **Learning loop from the board.** When a board task finishes after a correction, a short read-only *learner* run turns it into a lesson.
