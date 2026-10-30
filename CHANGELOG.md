@@ -4,7 +4,7 @@ All notable changes to agenticOS. Format: [Keep a Changelog](https://keepachange
 
 Releases before 0.7.0 were numbered after the fact, one per merged pull request, and are not tagged yet.
 
-## [0.8.0] — unreleased (`feat/model-per-task`)
+## [0.8.0] — 2026-10-30 (PR #9)
 
 ### Added
 - **Model per task, set by hand:**
