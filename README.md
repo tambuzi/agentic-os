@@ -27,7 +27,9 @@ Someone told you to "use agenticOS". This section explains what that means and g
 - **It remembers what it learns.** Facts you tell it are kept for next time, in every linked project.
 - **It can deliver one feature across several projects.** It plans with you, then runs helpers in parallel, one per project.
 - **It asks before risky things.** Helpers can only use the tools a project allows; anything else waits for your yes or no.
-- **It learns from mistakes.** When a helper gets corrected, agenticOS writes a short lesson, and you confirm or reject it.
+- **It learns from mistakes.** When a helper gets corrected, or you correct your own assistant ("no, use snake_case"), agenticOS writes a short lesson, and you confirm or reject it.
+- **Helpers talk to each other.** One project's helper can warn the others ("the API now returns total_cents") or ask them a question.
+- **It picks the right model.** Small tasks run on a cheap model, big ones on the strongest; you can also choose by hand.
 - **Costs are tracked.** Each helper run records what it cost, and you can set budgets.
 
 Your business data stays on your machine, in `~/.agenticos/data`. Only code and shared how-tos go to GitHub.
@@ -179,8 +181,10 @@ aos inbox list                    # org-memory proposals waiting for approval
 aos inbox show <id>
 aos inbox apply <id>              # accept → written to org memory
 aos inbox reject <id>
-aos lessons [project] [--all]     # lessons learned from board corrections
+aos lessons [project] [--all]     # lessons learned from corrections (board work and your sessions)
 aos lessons confirm|reject <project>/<id>
+aos lessons sessions              # sessions waiting to be learned from
+aos lessons learn-session --last  # learn from your latest session now, even without corrections
 aos worker [claude|kiro]          # show or set the tool that runs board work on this machine
 aos acp install claude            # live worker sessions for Claude (Kiro needs nothing)
 aos sync <project>                # re-copy skills/config (also runs at every session start)
@@ -200,10 +204,16 @@ skills:
   mode: direct                        # or inbox, to review agent-written skills
 context:
   max_chars: 16000                    # size limit of the session-start context
+board:
+  skip_review_sizes: [trivial]        # sizes accepted after their checks, without a reviewer
+  second_review: []                   # e.g. [large, security]: two independent reviewers must pass
+  messages: {enabled: true, max_per_attempt: 5, max_chars: 1500}   # worker-to-worker messages
 learning:
   enabled: true                       # learner runs after board tasks that needed corrections
   max_in_context: 8                   # lessons per project in a session or worker context
   min_confidence: 0.5
+  sessions: true                      # learn from your own Claude Code sessions with corrections
+  sessions_daily_budget_usd: 1.0
 workers:
   claude:
     model: sonnet                     # the default when nothing else decides
@@ -285,8 +295,8 @@ How lessons are used:
 | Agent writes long-form knowledge docs itself | ❌ not yet: agents have no `knowledge_write` tool; they save to memory or a skill instead |
 | **Learning loop from the board**: lessons from corrections, ranked into context, promoted to org memory when confirmed in 2+ projects | ✅ works now |
 | Learning from your own sessions (Claude Code `SessionEnd` hook; Kiro: manual trigger for now) | ✅ works now |
-| Search past sessions; prune unused or duplicate skills | 🔜 sub-project 3 |
-| Import from Notion/Confluence into `knowledge/` | 🔜 sub-project 4 |
+| Search past sessions; skill health, stock-take and compliance tests | 🔜 ROADMAP item 4 |
+| Import from Notion/Confluence into `knowledge/` | 🔜 ROADMAP item 5 |
 | Multi-project features with parallel Claude Code / Kiro workers (board) | ✅ works now |
 
 In interactive sessions (outside the board), the agent also saves memory and skills while the session runs, when the protocol or you prompt it. Saying *"save what you learned"* at the end of a session is still a good habit. Corrections you make are picked up automatically when the session ends.
@@ -306,16 +316,20 @@ One feature, several projects, several agents in parallel. Each agent works in i
 aos feature new checkout-v2 --title "Checkout v2" --projects shop-api,web,billing
 $EDITOR ~/.agenticos/data/features/checkout-v2/brief.md      # goal, scope
 $EDITOR ~/.agenticos/data/features/checkout-v2/contract.md   # APIs/events shared between projects
-aos task add checkout-v2 shop-api "Orders endpoint"
-aos task add checkout-v2 web "Checkout UI" --after 1
-aos task add checkout-v2 billing "Invoice on order" --after 1 --worker kiro
+aos task add checkout-v2 shop-api "Orders endpoint" --size standard --op feature
+aos task add checkout-v2 web "Checkout UI" --after 1 --size small
+aos task add checkout-v2 billing "Invoice on order" --after 1 --worker kiro --model claude-sonnet-4.5
+aos task add checkout-v2 shop-api "Fix login rate limit" --op fix --security
 
 # 2. Run: workers start in parallel (one per project at a time), each in its own git worktree
 aos board run --feature checkout-v2 --until-done   # exits when nothing more can run
 
 # 3. Watch and steer (another terminal)
-aos board                                   # status, blockers, stuck tasks, pending proposals
+aos board                                   # status, blockers, stuck tasks, open questions, permissions
 aos task show 2 --log                       # what a worker did
+aos task show 2 --messages                  # what workers told each other
+aos task approve 5 [--always] | deny 5      # a worker asks to run something outside its allow-list
+aos task steer 2 "use the v2 endpoint"      # guide a running worker
 aos feature approve 4 | reject 4            # contract change proposed by a worker
 aos task unblock 3 --note "key is in vault" # answer a blocker
 aos task retry 2 --resume --note "rename the button"   # feedback on a finished task
