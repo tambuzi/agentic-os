@@ -6,13 +6,21 @@ no cost), and builds short, scrubbed, quoted excerpts around them for a session 
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import secrets as _secrets
+import subprocess
+import sys
+import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .lessons import scrub_secrets
 from .quoting import quoted
+from .store import locked, read_text, write_atomic
 
 TURN_CHARS, TOOL_CHARS = 1500, 300
 BEFORE, AFTER = 3, 1
@@ -129,3 +137,153 @@ def excerpts(turns: list[Turn], hits: list[Hit]) -> list[dict]:
         out.append({"id": n, "kind": h.kind, "turns": [{"index": t.index, "role": t.role, "text": _show(t)}
                                                        for t in window]})
     return out
+
+
+# -- the queue ---------------------------------------------------------------------
+
+MAX_TRIES = 3
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def queue_dir(data: str | Path) -> Path:
+    return Path(data) / "sessions" / "queue"
+
+
+def _path(data, entry_id: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", entry_id or ""):
+        raise ValueError(f"bad queue id {entry_id!r}")
+    return queue_dir(data) / f"{entry_id}.json"
+
+
+def _load(path: Path) -> dict | None:
+    try:
+        e = json.loads(read_text(path))
+        return e if isinstance(e, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _save(data, entry: dict) -> None:
+    entry["updated"] = _now()
+    write_atomic(_path(data, entry["id"]), json.dumps(entry, indent=1) + "\n")
+
+
+def hit_key(turn: Turn, kind: str) -> str:
+    """A stable identity for a correction (positions shift as a transcript grows)."""
+    return hashlib.sha1(f"{kind}\0{turn.role}\0{turn.text}\0{turn.input}".encode()).hexdigest()[:16]
+
+
+def entries(data, status: str | None = None) -> list[dict]:
+    d = queue_dir(data)
+    found = [e for p in sorted(d.glob("*.json")) if (e := _load(p))] if d.is_dir() else []
+    return [e for e in found if status is None or e.get("status") == status]
+
+
+def enqueue(data, tool: str, session: str, project: str, project_dir: str, transcript: str,
+            hits: list[dict]) -> dict | None:
+    """Queue the hits not already queued for this session; None when nothing is new."""
+    seen = {h["key"] for e in entries(data) if e.get("tool") == tool and e.get("session") == session
+            for h in e.get("hits", [])}
+    new = [h for h in hits if h["key"] not in seen]
+    if not new:
+        return None
+    entry = {"id": f"{time.strftime('%Y%m%d-%H%M%S')}-{tool}-{_secrets.token_hex(3)}", "tool": tool,
+             "session": session, "project": project, "project_dir": str(project_dir), "transcript": str(transcript),
+             "hits": new, "status": "pending", "tries": 0, "reason": "", "created": _now()}
+    _save(data, entry)
+    return entry
+
+
+def claim(data, entry_id: str) -> dict | None:
+    """pending → running, once: a second job gets None."""
+    path = _path(data, entry_id)
+    with locked(path):
+        e = _load(path)
+        if not e or e.get("status") != "pending":
+            return None
+        e["status"] = "running"
+        _save(data, e)
+        return e
+
+
+def finish(data, entry_id: str, ok: bool, reason: str = "") -> None:
+    path = _path(data, entry_id)
+    with locked(path):
+        e = _load(path)
+        if not e:
+            return
+        if ok:
+            e["status"], e["reason"] = "done", reason
+        else:
+            e["tries"] = int(e.get("tries", 0)) + 1
+            e["status"] = "failed" if e["tries"] >= MAX_TRIES else "pending"
+            e["reason"] = reason
+        _save(data, e)
+
+
+def prune(data, days: int = 7) -> int:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    n = 0
+    for e in entries(data):
+        if e.get("status") in ("done", "failed") and datetime.fromisoformat(e.get("updated", e["created"])) <= cutoff:
+            _path(data, e["id"]).unlink(missing_ok=True)
+            n += 1
+    return n
+
+
+# -- capture (the end-of-session hook) -----------------------------------------------
+def _log(data, msg: str) -> None:
+    try:
+        p = Path(data) / "logs" / "sessions.log"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a") as fh:
+            fh.write(f"{_now()} {msg}\n")
+    except OSError:
+        pass
+
+
+def _launch(entry_id: str) -> None:
+    """Start the background learner for one entry, detached from the hook."""
+    from .config import aos_home
+    log = Path(aos_home()) / "data" / "logs" / "sessions.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, "a") as out:
+        subprocess.Popen([sys.executable, "-m", "aos", "lessons", "learn-session", entry_id],
+                         stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True,
+                         env={**os.environ})
+
+
+def capture(home, data, settings: dict, tool: str, transcript, session: str | None, project_dir,
+            launch=None) -> str:
+    """Called by the end-of-session hook: find corrections and queue them. Fast, never raises."""
+    try:
+        learning = settings.get("learning") or {}
+        if not learning.get("sessions", True):
+            return "off"
+        pdir = Path(project_dir or ".").expanduser().resolve()
+        for automated in (Path(home) / "worktrees", Path(data) / "runs"):
+            if pdir == automated.resolve() or automated.resolve() in pdir.parents:
+                return "automated session"
+        from .config import slug_for_path
+        slug = slug_for_path(pdir)
+        if not slug:
+            return "not a linked project"
+        if slug in (learning.get("sessions_exclude") or []):
+            return "excluded"
+        if tool != "claude":
+            return f"{tool} capture not available yet"
+        turns = read_claude_transcript(transcript)
+        hits = [{"key": hit_key(turns[h.index], h.kind), "kind": h.kind} for h in find_corrections(turns)]
+        if not hits:
+            return "no corrections"
+        entry = enqueue(data, tool, session or Path(transcript).stem, slug, pdir, transcript, hits)
+        if not entry:
+            return "nothing new"
+        (launch or globals()["_launch"])(entry["id"])
+        return f"queued {entry['id']}"
+    except Exception as e:  # the hook must never break or slow the user's session
+        _log(data, f"capture failed: {type(e).__name__}: {e}")
+        return "error"

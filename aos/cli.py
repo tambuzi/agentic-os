@@ -216,8 +216,10 @@ def _doctor_models(aos: AOS, line) -> None:
 
 def cmd_lessons(a) -> int:
     from . import lessons as L
-    aos = AOS(repo_root())
     words = list(a.args or [])
+    if words[:1] == ["capture"]:
+        return _lessons_capture(a)
+    aos = AOS(repo_root())
     if words and words[0] in ("show", "confirm", "reject", "learn"):
         if len(words) != 2:
             raise AosError(f"usage: aos lessons {words[0]} {'<task>' if words[0] == 'learn' else '<project>/<id>'}")
@@ -252,6 +254,32 @@ def cmd_lessons(a) -> int:
                 shown += 1
     if not shown:
         print("no lessons yet" if not a.all else "no lessons")
+    return 0
+
+
+def _lessons_capture(a) -> int:
+    """The end-of-session hook: always exits 0, prints one short line."""
+    from . import sessions
+    try:
+        transcript, session, project_dir = a.transcript, a.session, a.project_dir
+        if not transcript and not sys.stdin.isatty():
+            try:
+                hook = json.loads(sys.stdin.read() or "{}")
+            except ValueError:
+                hook = {}
+            transcript = hook.get("transcript_path")
+            session = session or hook.get("session_id")
+            project_dir = project_dir or hook.get("cwd")
+        aos = AOS(repo_root())
+        status = sessions.capture(aos.home, aos.data, aos.settings, a.tool or "claude", transcript or "",
+                                  session, project_dir or ".")
+    except Exception as e:
+        status = f"error: {type(e).__name__}"
+        try:
+            sessions._log(data_root(), f"capture failed: {e}")
+        except Exception:
+            pass
+    print(f"[aos] session learning: {status}")
     return 0
 
 
@@ -668,6 +696,10 @@ def _parser() -> argparse.ArgumentParser:
                                          "show|confirm|reject <project>/<id>, learn <task>")
     s.add_argument("args", nargs="*")
     s.add_argument("--all", action="store_true", help="include rejected and superseded lessons")
+    s.add_argument("--tool", choices=["claude", "kiro"], help="capture: the tool whose session ended")
+    s.add_argument("--transcript", help="capture: the session transcript (default: the hook's stdin JSON)")
+    s.add_argument("--session", help="capture: the session id")
+    s.add_argument("--project-dir", help="capture: the project the session ran in")
     s.set_defaults(fn=cmd_lessons)
 
     s = sub.add_parser("acp", help="live agent sessions (ACP) for board workers")

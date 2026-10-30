@@ -22,7 +22,7 @@ DEFAULTS = {
     "skills": {"mode": "direct"},
     "context": {"max_chars": 16000},
     "learning": {"enabled": True, "max_in_context": 8, "min_confidence": 0.5, "learner_timeout_min": 5,
-                 "max_ops_per_run": 3},
+                 "max_ops_per_run": 3, "sessions": True, "sessions_exclude": [], "sessions_daily_budget_usd": 1.0},
     "board": {"parallel": 3, "max_parallel": 6, "worker_memory_gb": 1.0, "min_free_memory_gb": 2.0,
               "start_stagger_sec": 2.0, "task_budget_usd": None, "feature_budget_usd": None,
               "task_budget_credits": None, "feature_budget_credits": None,
