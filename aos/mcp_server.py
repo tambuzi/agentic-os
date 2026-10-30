@@ -166,7 +166,8 @@ class BoardTools:
         return self.board.task(self.task_id)
 
     def _new_task(self, feature: str, project: str, title: str, spec: str, depends_on,
-                  model: str | None = None, size: str | None = None, security: bool = False) -> dict:
+                  model: str | None = None, size: str | None = None, security: bool = False,
+                  operation: str | None = None) -> dict:
         from .workers.common import check_model, clean_model, resolve_model
         model = clean_model(model) or None
         if project not in self.aos.projects():
@@ -176,7 +177,7 @@ class BoardTools:
         check_model(settings, profile, model)
         tid = self.board.add_task(feature, project, title, spec, depends_on or [], worker=profile,
                                   max_attempts=settings["max_attempts"], created_by=self.author,
-                                  model=model, size=size, security=security)
+                                  model=model, size=size, security=security, operation=operation)
         chosen, source = resolve_model(self.aos, self.board.task(tid))
         return {"task": tid, "worker": profile, "model": chosen, "model_source": source}
 
@@ -279,14 +280,15 @@ class BoardTools:
     @_safe
     def task_create(self, project: str, title: str, spec: str = "", depends_on: list[int] | None = None,
                     feature: str | None = None, size: str | None = None, model: str | None = None,
-                    security: bool = False) -> dict:
+                    security: bool = False, operation: str | None = None) -> dict:
         if self.task_id:
             own = self._own()
             Board._check_generation(own, self.attempt)
             feature = own["feature"]
         if not feature:
             raise AosError("feature is required")
-        return self._new_task(feature, project, title, spec, depends_on, model=model, size=size, security=security)
+        return self._new_task(feature, project, title, spec, depends_on, model=model, size=size, security=security,
+                              operation=operation)
 
     # -- planner mode --------------------------------------------------------
     @_safe
@@ -356,7 +358,7 @@ class BoardTools:
             **_credits(self.board.feature_cost(feature, "credit")),
             "tasks": [{"id": t["id"], "project": t["project"], "title": t["title"], "status": t["status"],
                        "worker": t["worker"], "transport": t.get("transport"), "attempts": t["attempts"],
-                       "size": t.get("size"), **dict(zip(("model", "model_source"), resolve_model(self.aos, t))),
+                       "size": t.get("size"), "operation": t.get("operation"), **dict(zip(("model", "model_source"), resolve_model(self.aos, t))),
                        "cost_usd": round(self.board.task_cost(t["id"]), 4),
                        **_credits(self.board.task_cost(t["id"], "credit")),
                        "result": (t["result"] or "").splitlines()[0] if t["result"] else None} for t in tasks],
@@ -807,9 +809,9 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
 
         @mcp.tool()
         def task_create(project: str, title: str, spec: str = "", depends_on: list[int] | None = None,
-                        size: str | None = None) -> dict:
-            """Add a follow-up task to this feature (any linked project). size: trivial|small|standard|large."""
-            return bt.task_create(project, title, spec, depends_on, size=size)
+                        size: str | None = None, operation: str | None = None) -> dict:
+            """Add a follow-up task to this feature (any linked project). size: trivial|small|standard|large. operation: feature|change|fix|refactor."""
+            return bt.task_create(project, title, spec, depends_on, size=size, operation=operation)
 
         @mcp.tool()
         def task_complete(summary: str) -> dict:
@@ -830,10 +832,11 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
         @mcp.tool()
         def task_create(project: str, title: str, feature: str, spec: str = "",
                         depends_on: list[int] | None = None, size: str | None = None,
-                        model: str | None = None, security: bool = False) -> dict:
-            """Add a task for one project to a feature; depends_on lists task ids that must finish first. size: trivial|small|standard|large — picks the model automatically (cheap for trivial, strong for large) and trivial tasks skip the independent reviewer. model: only when the user chose one by hand. security: true when the task touches auth, permissions, secrets, crypto or untrusted input (its reviewer gets a security checklist)."""
+                        model: str | None = None, security: bool = False,
+                        operation: str | None = None) -> dict:
+            """Add a task for one project to a feature; depends_on lists task ids that must finish first. size: trivial|small|standard|large — picks the model automatically (cheap for trivial, strong for large) and trivial tasks skip the independent reviewer. model: only when the user chose one by hand. security: true when the task touches auth, permissions, secrets, crypto or untrusted input (its reviewer gets a security checklist). operation: feature (new behaviour) | change (existing behaviour changes) | fix (a bug: failing test first) | refactor (no behaviour change) — sets the worker's first move and what its reviewer checks."""
             return bt.task_create(project, title, spec, depends_on, feature=feature, size=size, model=model,
-                                  security=security)
+                                  security=security, operation=operation)
 
         @mcp.tool()
         def board_read(feature: str, since_event: int = 0) -> dict:
