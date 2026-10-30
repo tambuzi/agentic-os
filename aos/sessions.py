@@ -134,9 +134,20 @@ def excerpts(turns: list[Turn], hits: list[Hit]) -> list[dict]:
     out = []
     for n, h in enumerate(hits, 1):
         window = turns[max(0, h.index - BEFORE): h.index + AFTER + 1]
-        out.append({"id": n, "kind": h.kind, "turns": [{"index": t.index, "role": t.role, "text": _show(t)}
-                                                       for t in window]})
+        out.append({"id": n, "kind": h.kind, "turn": h.index,
+                    "turns": [{"index": t.index, "role": t.role, "text": _show(t)} for t in window]})
     return out
+
+
+def entry_excerpts(entry: dict) -> list[dict]:
+    """The excerpts of a queued session: its transcript re-read, only the queued corrections."""
+    turns = read_claude_transcript(entry["transcript"])
+    keys = {h["key"] for h in entry.get("hits", [])}
+    if entry.get("all_turns"):  # manual trigger: the whole (tail of the) session as one window
+        return [{"id": 1, "kind": "manual", "turn": turns[-1].index if turns else 0,
+                 "turns": [{"index": t.index, "role": t.role, "text": _show(t)} for t in turns[-40:]]}]
+    hits = [h for h in find_corrections(turns) if hit_key(turns[h.index], h.kind) in keys]
+    return excerpts(turns, hits)
 
 
 # -- the queue ---------------------------------------------------------------------
@@ -174,6 +185,10 @@ def _save(data, entry: dict) -> None:
 def hit_key(turn: Turn, kind: str) -> str:
     """A stable identity for a correction (positions shift as a transcript grows)."""
     return hashlib.sha1(f"{kind}\0{turn.role}\0{turn.text}\0{turn.input}".encode()).hexdigest()[:16]
+
+
+def entry(data, entry_id: str) -> dict | None:
+    return _load(_path(data, entry_id))
 
 
 def entries(data, status: str | None = None) -> list[dict]:

@@ -68,9 +68,12 @@ def board():
 
 
 def learner():
-    from aos.config import repo_root
+    from aos.config import data_root, repo_root
     from aos.core import AOS
     from aos.mcp_server import LearnerTools
+    if state.get("session_entry"):
+        from aos.sessions import entry
+        return LearnerTools(AOS(repo_root()), board(), session_entry=entry(data_root(), state["session_entry"]))
     return LearnerTools(AOS(repo_root()), board(), state["task"])
 
 
@@ -156,8 +159,8 @@ def run_prompt(rid, sid, text):
     elif m == "learn_new":
         lt = learner()
         corrections = lt.learning_input()["corrections"]
-        lt.lesson_new(f"when working on task {state['task']}", "Follow the guidance the user gave mid-task.",
-                      "workflow", [corrections[0]["event"]])
+        lt.lesson_new(f"when working on task {state['task'] or 'this project'}", "Follow the guidance the user gave mid-task.",
+                      "workflow", [corrections[0].get("event", corrections[0].get("id"))])
         lt.learning_done("1 new lesson")
         finish_turn(rid, sid)
     elif m == "learn_nothing":
@@ -199,7 +202,10 @@ def handle(msg):
             state["task"] = int(args[args.index("--task") + 1])
         if "--attempt" in args:
             state["generation"] = int(args[args.index("--attempt") + 1])
-        state["role"] = "reviewer" if "--review" in args else "learner" if "--learn" in args else "worker"
+        state["role"] = ("reviewer" if "--review" in args else
+                         "learner" if "--learn" in args or "--learn-session" in args else "worker")
+        if "--learn-session" in args:
+            state["session_entry"] = args[args.index("--learn-session") + 1]
         sid = params.get("sessionId") or f"sess-{state['task']}-{time.time_ns()}"
         state["sessions"].add(sid)
         note(method, {"sessionId": sid, "meta": params.get("_meta"), "cwd": params.get("cwd"),
