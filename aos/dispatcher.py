@@ -194,6 +194,18 @@ class Dispatcher:
                 self.board.attempt_failed(t["id"], "dispatcher restarted; previous worker abandoned")
             except TASK_ERRORS as e:
                 _warn(f"recover task #{t['id']}: {e}")
+        # reviewers and learners record no pid: they can't be stopped, only made stale (a new
+        # review gets a new generation; a learner's run ends at its `learned` event)
+        for t in self.board.reviewable():
+            if t["review_stage"] != "reviewing":
+                continue
+            self._remove_kiro_agent(t)
+            try:
+                self.board.review_unfinished(t["id"], "dispatcher restarted; previous reviewer abandoned")
+            except TASK_ERRORS as e:
+                _warn(f"recover task #{t['id']}: {e}")
+        for t in self.board.learnable():
+            self._remove_kiro_agent(t)
 
     def _remove_kiro_agent(self, t: dict) -> None:
         """A crashed dispatcher never ran cleanup: drop the task's per-run Kiro agent file."""
