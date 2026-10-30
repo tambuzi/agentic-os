@@ -40,6 +40,10 @@ def contains_secret(text: str) -> bool:
     return bool(_SECRET.search(text or ""))
 
 
+def scrub_secrets(text: str) -> str:
+    return _SECRET.sub("[secret removed]", text or "")
+
+
 class LessonError(AosError):
     """A lesson operation was refused; the message is shown to whoever asked (the learner)."""
 
