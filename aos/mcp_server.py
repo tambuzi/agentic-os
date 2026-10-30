@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -178,6 +179,8 @@ class BoardTools:
     def task_show(self) -> dict:
         t = self._own()
         self.board.mark_seen(t["id"])
+        if self.review:
+            t = {k: v for k, v in t.items() if k not in ("reviews_passed", "reviews_required")}
         return {"task": t, "feature": self.board.feature(t["feature"]), "brief": self.board.brief(t["feature"]),
                 "contract": self.board.contract(t["feature"]),
                 "depends_on": self.board.dependency_results(t["id"]),
@@ -221,8 +224,11 @@ class BoardTools:
             messages = self.board.steer_messages(t["id"], since_event)
         if not feature:
             raise AosError("feature is required")
-        out = {"events": self.board.events(feature, since_event),
-               "contract_version": self.board.feature(feature)["contract_version"]}
+        events = self.board.events(feature, since_event)
+        if self.review:  # a later reviewer judges fresh: never another reviewer's verdict on this task
+            events = [e for e in events if not (e["task"] == self.task_id and e["kind"] == "status"
+                                                and re.match(r"independent review \d+ of \d+ passed", e["body"] or ""))]
+        out = {"events": events, "contract_version": self.board.feature(feature)["contract_version"]}
         if messages is not None:
             out["messages_for_you"] = messages  # from the user: follow them
         return out

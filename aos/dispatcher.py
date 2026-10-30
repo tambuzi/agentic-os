@@ -29,7 +29,7 @@ from .core import AOS
 from .errors import AosError
 from .workers import adapter
 from .workers.common import (Launch, add_allowed_tool, linked_project_path, parse_cost, prepare_learn, prepare_review,
-                             prepare_run, review_needs)
+                             prepare_run, review_needs, review_run_name)
 from .acp.permissions import decide
 from .acp.runner import AcpRun
 from .acp.tools import AdapterMissing, option_for
@@ -298,8 +298,14 @@ class Dispatcher:
                 ok, detail = False, f"verification error: {type(e).__name__}: {e}"
             try:
                 board_cfg = self.aos.settings["board"]
-                size = self.board.task(tid).get("size")
-                if ok and board_cfg.get("review", True) and size in (board_cfg.get("skip_review_sizes") or []):
+                task = self.board.task(tid)
+                skip = (ok and board_cfg.get("review", True) and task.get("size") in (board_cfg.get("skip_review_sizes") or [])
+                        and not task.get("security"))
+                if skip:  # a trivial change that turns out security-sensitive is still reviewed
+                    wt = worktree_path(self.aos.home, task["feature"], task["project"])
+                    skip = not review_needs(task, wt, board_cfg)[0]
+                size = task.get("size")
+                if skip:
                     self.board.accept(tid, f"{detail}; {size} task: independent review skipped")
                 elif ok and board_cfg.get("review", True):
                     self.board.mark_verified(tid, detail)  # an independent reviewer is next
@@ -700,7 +706,11 @@ class Dispatcher:
     def _launch_review(self, t: dict) -> None:
         tid = t["id"]
         wt = worktree_path(self.aos.home, t["feature"], t["project"])
-        reasons, required = review_needs(t, wt, self.aos.settings["board"])
+        try:
+            reasons, required = review_needs(t, wt, self.aos.settings["board"])
+        except Exception as e:  # deciding the review depth must never stop the dispatcher
+            _warn(f"task #{tid} review depth: {e}")
+            reasons, required = [], 1
         task = self.board.start_review(tid, required=required)  # new generation: the reviewer's own token
         if reasons and task["reviews_passed"] == 0 and task["review_attempts"] == 1:
             self.board.log_event(tid, "status", "security review: " + "; ".join(reasons))
@@ -711,7 +721,7 @@ class Dispatcher:
             spec, settings = prepare_review(aos, self.board, self._run_model(task), wt, project_path, self.aos_bin,
                                             security=reasons)
             mod = adapter(settings["adapter"])
-            log_path = self.board.data / "logs" / f"{tid}-review-{task['review_attempts']}.log"
+            log_path = self.board.data / "logs" / f"{tid}-review-{review_run_name(task)}.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
             proc, launch, acp, log, transport = self._spawn(tid, spec, settings, mod, log_path)
         except Exception as e:  # a reviewer that cannot start counts as a review without verdict

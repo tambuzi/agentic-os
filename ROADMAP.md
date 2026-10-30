@@ -146,7 +146,7 @@ Let workers in the same feature talk directly, on top of ACP live delivery. Toda
   - trivial tasks skip the reviewer;
   - a fix starts by reproducing the bug as a failing test.
 - [x] Security trigger: a diff touching auth, user input, database queries, file paths, secrets or crypto gets a security-focused reviewer.
-- [x] `board.review: 2` for large or security tasks: two independent reviewers must both pass (ECC `santa-method`).
+- [x] `board.second_review: [large, security]`: two independent reviewers must both pass (ECC `santa-method`).
 - [ ] Optional: a council of fresh-context voices (skeptic, pragmatist, critic) for contract decisions (ECC `council`).
 - [ ] `aos doctor --security`: scan linked projects' `.claude`/`.kiro` configs for `Bash(*)`-style permissions, secrets in MCP configs, and hook injection (ECC AgentShield).
 

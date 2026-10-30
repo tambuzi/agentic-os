@@ -654,8 +654,10 @@ class Board:
         with self._tx() as c:
             t = self._in_review(c, tid, "reviewing")
             if t["review_attempts"] >= 2:
-                self._accept(c, tid, f"accepted without independent review (reviewer failed twice: {reason})",
-                             "dispatcher", "review_skipped")
+                what = (f"accepted with {t['reviews_passed']} of {t['reviews_required']} independent reviews passed "
+                        f"(the next reviewer failed twice: {reason})" if t["reviews_passed"]
+                        else f"accepted without independent review (reviewer failed twice: {reason})")
+                self._accept(c, tid, what, "dispatcher", "review_skipped")
             else:
                 c.execute("UPDATE tasks SET review_stage='verified', updated=? WHERE id=?", (now(), int(tid)))
                 self._event(c, t["feature"], int(tid), "status", "dispatcher",

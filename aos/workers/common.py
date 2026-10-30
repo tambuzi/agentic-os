@@ -383,13 +383,28 @@ def build_review_context(aos: AOS, board: Board, task: dict, worktree: Path,
 
 def review_needs(task: dict, worktree: Path, board_cfg: dict) -> tuple[list[str], int]:
     """(security reasons, independent passes required) for a task's change, by fixed rules."""
+    import subprocess
     from ..review_focus import security_reasons
     base = task.get("base_commit") or "HEAD~1"
-    paths = [p for p in _git_out(["diff", "--name-only", f"{base}..HEAD"], worktree).splitlines() if p]
-    reasons = security_reasons(paths, _git_out(["diff", f"{base}..HEAD"], worktree), bool(task.get("security")))
+
+    def git(*args: str) -> str:  # a missing worktree or failing git means "no change seen", never an error text
+        try:
+            r = subprocess.run(["git", *args], cwd=worktree, capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return r.stdout if r.returncode == 0 else ""
+    paths = [p for p in git("diff", "--name-only", f"{base}..HEAD").splitlines() if p]
+    reasons = security_reasons(paths, git("diff", f"{base}..HEAD"), bool(task.get("security")))
     second = board_cfg.get("second_review") or []
     needs_two = (task.get("size") in second) or ("security" in second and bool(reasons))
     return reasons, 2 if needs_two else 1
+
+
+def review_run_name(task: dict) -> str:
+    """Name for a reviewer's log and run directory: unique per round and per try."""
+    if task.get("reviews_passed"):
+        return f"{task['reviews_passed'] + 1}.{task.get('review_attempts', 0)}"
+    return str(task.get("review_attempts", 0))
 
 
 def prepare_review(aos: AOS, board: Board, task: dict, worktree: Path, project_path: Path,
@@ -401,7 +416,7 @@ def prepare_review(aos: AOS, board: Board, task: dict, worktree: Path, project_p
         if needed not in allowed:
             allowed.append(needed)
     settings = {**settings, "allowed_tools": allowed}
-    run_dir = board.data / "runs" / f"{task['id']}-review-{task.get('review_attempts', 0)}"
+    run_dir = board.data / "runs" / f"{task['id']}-review-{review_run_name(task)}"
     context_file = run_dir / "context.md"
     write_atomic(context_file, build_review_context(aos, board, task, Path(worktree), security))
     prompt = f"Review task #{task['id']}: {task['title']}. Follow the reviewer protocol and end with one verdict."
