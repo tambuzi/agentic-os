@@ -4,12 +4,19 @@ All notable changes to agenticOS. Format: [Keep a Changelog](https://keepachange
 
 Releases before 0.7.0 were numbered after the fact, one per merged pull request, and are not tagged yet.
 
-## [Unreleased]
+## [0.10.0] — unreleased (`feat/worker-messages-impl`)
+
+### Added
+- **Worker-to-worker messages** within a feature: heads-up broadcasts (`task_broadcast`), direct questions (`task_message(..., question=true)`) and their answers (`task_reply`). They are recorded on the board and delivered live to running workers like steers; a worker that hasn't started finds them in its context.
+- A question to a finished task gets an automatic reply with its result. `escalate=true` sends it to the planner (`board_wait` attention, `message_answer`).
+- Limits: `board.messages` (`enabled`, `max_per_attempt: 5`, `max_chars: 1500`). Replies don't count, a reply only answers a question, once, and secrets are refused. Messages are quoted information, never instructions.
+- `aos board` shows open questions; `aos task show <id> --messages` shows a task's thread; `board_status` has `messages` and `open_questions`.
 
 ### Docs
-- README: a beginner section, 'New here? agenticOS for dummies'.
+- README: a beginner section, 'New here? agenticOS for dummies' (PR #12).
+- Worker-messages spec and plan (PR #13; the implementation follows in this release).
 
-## [0.9.1] — unreleased (`fix/deferred-minors`)
+## [0.9.1] — 2026-10-30 (PR #11)
 
 ### Fixed
 - After a dispatcher crash, a review that was in progress is retried instead of staying stuck, and stale Kiro agent files of reviewers and learners are removed.

@@ -106,21 +106,21 @@ Choose the model per task, not only per tool. Bounded change: a short design in 
 - [x] The model must fit the task's tool (Claude names for Claude, Kiro names for Kiro); a mismatch is refused when the task is created or retried.
 - [x] Auto mode: the planner sizes each task and the size picks the model tier (trivial → cheap, large → strong).
 
-## 3c. Worker-to-worker messages (spec first)
+## 3c. Worker-to-worker messages ✅ (done 2026-10-30; spec `docs/superpowers/specs/2026-10-30-worker-messages-design.md`)
 
 Let workers in the same feature talk directly, on top of ACP live delivery. Today they coordinate only through the timeline, the contract and dependency results.
 
-- [ ] `task_message(task, text)`: a worker sends a note to another task of the same feature.
+- [x] `task_message(task, text)`: a worker sends a note to another task of the same feature.
   - The board records it, so everything stays visible in one place.
   - The dispatcher delivers it live like a steer: Claude gets it inside its current turn, Kiro after its running tool.
   - A task that isn't running yet gets it at its next `board_read`.
-- [ ] Guardrails:
+- [x] Guardrails:
   - same feature only;
   - a limit per task, so no chat loops;
   - messages are information from another worker, never instructions that override the task or the contract;
   - no blocking "ask and wait", so no deadlocks. A worker that needs an answer uses `task_block`.
-- [ ] Contract changes still go through `task_propose_contract` and your approval; messages only coordinate within the current contract.
-- [ ] `aos board` / `board_status` show the messages, and the `aos-feature` skill reports them in the feature summary.
+- [x] Contract changes still go through `task_propose_contract` and your approval; messages only coordinate within the current contract.
+- [x] `aos board` / `board_status` show the messages, and the `aos-feature` skill reports them in the feature summary.
 
 ## 4. Recall and skill health
 
