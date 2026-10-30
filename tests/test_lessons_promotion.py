@@ -85,3 +85,24 @@ def test_a_declined_group_stays_declined_when_a_project_joins(aos, capsys):
     billing.decide(b.id, True)
     assert len(lessons.groups(aos.data)[0]) == 3
     assert lessons.stage_promotions(aos) == []
+
+
+def test_concurrent_staging_proposes_once(aos, monkeypatch):
+    import threading
+    import time
+    api, a, web, w = linked(aos)
+    api.decide(a.id, True)
+    real = inbox.stage
+
+    def slow(*args, **kw):
+        time.sleep(0.3)  # both callers have read the candidates before either marks the lessons
+        return real(*args, **kw)
+    monkeypatch.setattr(inbox, "stage", slow)
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(lessons.stage_promotions(aos))) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(len(r) for r in results) == [0, 1]
+    assert len(inbox.list_proposals(aos.data)) == 1

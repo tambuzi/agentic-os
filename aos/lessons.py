@@ -400,15 +400,17 @@ def stage_promotions(aos) -> list[str]:
     declined for good (see AOS.apply_proposal / reject_proposal)."""
     from . import inbox
     staged = []
-    for group in promotion_candidates(aos.data):
-        refs = [l.ref for l in group]
-        projects = sorted({l.project for l in group if l.status == "confirmed"})
-        pid = inbox.stage(aos.data, "memory", "add", {"scope": "org", "text": _group_rule(group), "lessons": refs},
-                          source="learning", reason=f"lesson confirmed in {len(projects)} projects "
-                                                    f"({', '.join(projects)}): {', '.join(refs)}")
-        for l in group:
-            LessonStore(aos.data, l.project).set_fields(l.id, promotion=pid)
-        staged.append(pid)
+    # the dispatcher and a CLI confirm may stage at once: candidates are read under the lock
+    with locked(Path(aos.data) / "lessons" / ".promotions"):
+        for group in promotion_candidates(aos.data):
+            refs = [l.ref for l in group]
+            projects = sorted({l.project for l in group if l.status == "confirmed"})
+            pid = inbox.stage(aos.data, "memory", "add", {"scope": "org", "text": _group_rule(group), "lessons": refs},
+                              source="learning", reason=f"lesson confirmed in {len(projects)} projects "
+                                                        f"({', '.join(projects)}): {', '.join(refs)}")
+            for l in group:
+                LessonStore(aos.data, l.project).set_fields(l.id, promotion=pid)
+            staged.append(pid)
     return staged
 
 
