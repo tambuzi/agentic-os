@@ -58,8 +58,8 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 
-SIZES = ("trivial", "small", "standard", "large")
-FINISHED_FOR_MESSAGES = ("review", "done", "failed")  # a question to these gets the automatic reply  # a task's size picks its model in auto mode
+SIZES = ("trivial", "small", "standard", "large")  # a task's size picks its model in auto mode
+FINISHED_FOR_MESSAGES = ("review", "done", "failed")  # a question to these gets the automatic reply
 
 
 def now() -> str:
@@ -165,6 +165,8 @@ class Board:
         c.execute(f"UPDATE tasks SET {', '.join(f'{k}=?' for k in sets)} WHERE id=?",
                   (*sets.values(), int(tid)))
         self._event(c, t["feature"], int(tid), "status", author, body or f"{t['status']} → {to}")
+        if to in FINISHED_FOR_MESSAGES and t["status"] not in FINISHED_FOR_MESSAGES:
+            self._answer_for_finished(c, {**dict(t), "status": to, **fields})
         return dict(t)
 
     # -- features ------------------------------------------------------------
@@ -490,6 +492,27 @@ class Board:
                         (int(tid),)).fetchone()
         return row[0] or 0
 
+    def _auto_reply(self, c, target: dict, qid: int, asker: int) -> int:
+        """aos answers for a task whose worker has ended: its status, result and branch."""
+        state = {"review": "waiting for review"}.get(target["status"], target["status"])
+        result = (target.get("result") or "").strip()
+        first = result.splitlines()[0] if result else "(no result)"
+        text = (f"task #{target['id']} ({target['project']}) is {state}; its worker has ended. Its result: {first}. "
+                f"Its commits are on branch feature/{target['feature']} in the {target['project']} worktree. If you "
+                f"need more, ask again with escalate=true and the planner will answer.")
+        body = {"from": "aos", "to": asker, "question": False, "escalated": False, "text": text, "re": qid}
+        return c.execute("INSERT INTO events(feature, task, ts, kind, author, body) VALUES (?,?,?,?,?,?)",
+                         (target["feature"], target["id"], now(), "reply", "aos", json.dumps(body))).lastrowid
+
+    def _answer_for_finished(self, c, task: dict) -> None:
+        """A task's worker ended: its unanswered direct questions get the automatic reply."""
+        rows = self._message_rows(c, task["feature"])
+        answered = {m["re"] for m in rows if m["kind"] == "reply"}
+        for q in rows:
+            if q["kind"] == "message" and q["question"] and not q["escalated"] and q["to"] == task["id"] \
+                    and q["id"] not in answered:
+                self._auto_reply(c, task, q["id"], q["from"])
+
     @staticmethod
     def _parse_message(e) -> dict:
         body = json.loads(e["body"])
@@ -504,7 +527,7 @@ class Board:
         for e in rows:
             try:
                 out.append(self._parse_message(e))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 continue
         return out
 
@@ -565,15 +588,7 @@ class Board:
             mid = cur.lastrowid
             auto, finished = None, target is not None and target["status"] in FINISHED_FOR_MESSAGES
             if finished and question and not escalate:
-                first = (target["result"] or "").strip().splitlines()[0] if (target["result"] or "").strip() else "(no result)"
-                state = {"review": "waiting for review"}.get(target["status"], target["status"])
-                reply = (f"task #{target['id']} ({target['project']}) is {state}; its worker has ended. "
-                         f"Its result: {first}. Its commits are on branch feature/{target['feature']} in the "
-                         f"{target['project']} worktree. If you need more, ask again with escalate=true and the "
-                         f"planner will answer.")
-                rb = {"from": target["id"], "to": src["id"], "question": False, "escalated": False, "text": reply, "re": mid}
-                auto = c.execute("INSERT INTO events(feature, task, ts, kind, author, body) VALUES (?,?,?,?,?,?)",
-                                 (src["feature"], target["id"], now(), "reply", "aos", json.dumps(rb))).lastrowid
+                auto = self._auto_reply(c, target, mid, src["id"])
         return {"message": mid, "delivered": "recorded" if finished else "queued", "auto_reply": auto}
 
     def reply(self, tid: int, message_id: int, text: str, author: str | None = None,
@@ -581,6 +596,8 @@ class Board:
         """Answer a question addressed to you (directly or to "all"), once. Replies don't count
         toward the limit, so a reply is only ever to a question: exchanges stay bounded."""
         s = self._message_settings(settings)
+        if not s["enabled"]:
+            raise AosError("worker messages are disabled (board.messages.enabled)")
         text = self._check_text(text, s)
         with self._tx() as c:
             me = self._task_row(c, tid)
@@ -604,6 +621,9 @@ class Board:
             q = self._one_message(c, message_id)
             if q["kind"] != "message" or not q["escalated"]:
                 raise AosError(f"#{message_id} isn't an escalated question; the worker it asked answers it")
+            if any(m["kind"] == "reply" and m["re"] == q["id"] and m["from"] == "planner"
+                   for m in self._message_rows(c, q["feature"], q["id"])):
+                raise AosError(f"#{message_id} was already answered")
             body = {"from": "planner", "to": q["from"], "question": False, "escalated": False, "text": text, "re": q["id"]}
             rid = c.execute("INSERT INTO events(feature, task, ts, kind, author, body) VALUES (?,?,?,?,?,?)",
                             (q["feature"], q["from"], now(), "reply", author, json.dumps(body))).lastrowid
@@ -626,11 +646,23 @@ class Board:
             rows = self._message_rows(c, t["feature"], since)
         return [m for m in rows if m["to"] == t["id"] or (m["to"] == "all" and m["from"] != t["id"])]
 
-    def thread(self, tid: int) -> list[dict]:
+    def delivered_message_ids(self, tid: int) -> set[int]:
+        """Messages already put in front of a task's live session."""
+        rows = self._rows("SELECT body FROM events WHERE task=? AND kind IN ('message_delivered','message_queued')",
+                          (int(tid),))
+        return {int(m.group(1)) for r in rows if (m := re.match(r"#(\d+) ", r["body"] or ""))}
+
+    def thread(self, tid: int, upto: int | None = None) -> list[dict]:
         t = self.task(tid)
         with closing(self._connect()) as c:
             rows = self._message_rows(c, t["feature"])
+        if upto is not None:
+            rows = [m for m in rows if m["id"] <= upto]
         return [m for m in rows if m["from"] == t["id"] or m["to"] == t["id"] or (m["to"] == "all" and m["from"] != t["id"])]
+
+    def feature_messages(self, feature: str) -> list[dict]:
+        with closing(self._connect()) as c:
+            return self._message_rows(c, feature)
 
     def open_questions(self, feature: str) -> list[dict]:
         """Questions nobody answered yet; an escalated one stays open until the planner answers."""
@@ -642,8 +674,8 @@ class Board:
             if q["kind"] != "message" or not q["question"]:
                 continue
             answers = [r for r in replies if r["re"] == q["id"]]
-            if q["escalated"]:
-                answers = [r for r in answers if r["from"] == "planner"]
+            if q["escalated"]:  # the planner or the asked worker itself, never the automatic reply
+                answers = [r for r in answers if r["from"] in ("planner", q["to"])]
             if not answers:
                 out.append(q)
         return out

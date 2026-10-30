@@ -211,7 +211,7 @@ def mcp_servers(project_path: Path, task_id: int, aos_bin: str, generation: int 
     return servers
 
 
-def build_worker_context(aos: AOS, board: Board, task: dict) -> str:
+def build_worker_context(aos: AOS, board: Board, task: dict, messages_upto: int | None = None) -> str:
     feature = board.feature(task["feature"])
     contract = board.contract(task["feature"])
     parts = [
@@ -227,12 +227,13 @@ def build_worker_context(aos: AOS, board: Board, task: dict) -> str:
         parts.append(f"## Checks before review\n\nWhen you call task_complete, aos runs `{shown}` in your worktree, "
                      "and the task only moves on if it passes (exit 0). Run it yourself before task_complete and "
                      "fix whatever it reports.")
-    thread = board.thread(task["id"])
+    thread = board.thread(task["id"], upto=messages_upto)  # later ones are delivered live
     if thread:
         from ..quoting import quoted
         lines = []
         for m in thread[-30:]:
-            who = "you" if m["from"] == task["id"] else ("the planner" if m["from"] == "planner" else f"#{m['from']}")
+            who = ("you" if m["from"] == task["id"] else "the planner" if m["from"] == "planner"
+                   else "aos" if m["from"] == "aos" else f"#{m['from']}")
             to = "you" if m["to"] == task["id"] else ("everyone" if m["to"] == "all" else f"#{m['to']}")
             kind = "question" if m["question"] else m["kind"]
             lines.append(f"- [{m['id']}] {kind} from {who} to {to}"
@@ -243,7 +244,7 @@ def build_worker_context(aos: AOS, board: Board, task: dict) -> str:
     if deps:
         parts.append("## Results of tasks you depend on\n\n" + "\n\n".join(
             f"### #{d['id']} {d['project']}: {d['title']}\n{(d['result'] or '').strip()}" for d in deps))
-    events = board.events(task["feature"], limit=30)
+    events = [e for e in board.events(task["feature"], limit=40) if e["kind"] not in ("message", "reply")][-30:]
     if events:
         parts.append("## Recent feature timeline\n\n" + "\n".join(
             f"- [{e['id']}] {e['author']} {e['kind']}: {(e['body'] or '').splitlines()[0] if e['body'] else ''}"
@@ -252,11 +253,11 @@ def build_worker_context(aos: AOS, board: Board, task: dict) -> str:
 
 
 def prepare_run(aos: AOS, board: Board, task: dict, worktree: Path, project_path: Path,
-                aos_bin: str) -> tuple[RunSpec, dict]:
+                aos_bin: str, messages_upto: int | None = None) -> tuple[RunSpec, dict]:
     settings = {**profile_settings(aos, task["worker"], task["project"]), "model": resolve_model(aos, task)[0]}
     run_dir = board.data / "runs" / f"{task['id']}-{task['attempts']}"
     context_file = run_dir / "context.md"
-    write_atomic(context_file, build_worker_context(aos, board, task))
+    write_atomic(context_file, build_worker_context(aos, board, task, messages_upto))
     base = f"Do task #{task['id']}: {task['title']}. Follow the board worker protocol."
     note = (task.get("note") or "").strip()
     if task.get("resume") and note:

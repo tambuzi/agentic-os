@@ -446,7 +446,7 @@ class Dispatcher:
             return
         for m in pending:
             r.msg_since = m["id"]
-            sender = m["from"] if m["from"] == "planner" else f"worker #{m['from']}"
+            sender = m["from"] if m["from"] in ("planner", "aos") else f"worker #{m['from']}"
             project = ""
             if isinstance(m["from"], int):
                 try:
@@ -905,7 +905,8 @@ class Dispatcher:
         try:
             aos = AOS(self.aos.repo, home=self.aos.home, slug=t["project"], data=self.aos.data)
             mark = self._last_event_id(t["feature"])  # before the context is written: nothing falls in between
-            spec, settings = prepare_run(aos, self.board, self._run_model(task), wt, project_path, self.aos_bin)
+            spec, settings = prepare_run(aos, self.board, self._run_model(task), wt, project_path, self.aos_bin,
+                                         messages_upto=mark)
             mod = adapter(settings["adapter"])
             log_path = self.board.data / "logs" / f"{tid}-{task['attempts']}.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)

@@ -115,7 +115,7 @@ class Tools:
 
 
 WORKER_TOOLS = {"task_show", "board_read", "task_comment", "task_block", "task_propose_contract",
-                "task_create", "task_complete"}
+                "task_create", "task_complete", "task_message", "task_broadcast", "task_reply"}
 PLANNER_TOOLS = {"feature_create", "feature_show", "task_create", "board_read", "board_start", "board_status",
                  "task_unblock", "task_retry", "task_cancel", "proposal_decide", "feature_workflow",
                  "board_wait", "task_steer", "permission_decide", "lessons_list", "lesson_decide",
@@ -191,7 +191,7 @@ class BoardTools:
                 "contract": self.board.contract(t["feature"]),
                 "depends_on": self.board.dependency_results(t["id"]),
                 "messages_for_you": self.board.steer_messages(t["id"])[-10:],
-                **({} if self.review else {"messages": self.board.thread(t["id"])[-20:]})}
+                **({} if self.review else {"messages": _quote_messages(self.board.thread(t["id"])[-20:])})}
 
     @_safe
     def task_comment(self, text: str) -> dict:
@@ -262,7 +262,8 @@ class BoardTools:
             messages = self.board.steer_messages(t["id"], since_event)
         if not feature:
             raise AosError("feature is required")
-        events = self.board.events(feature, since_event)
+        # messages travel only through `messages` (quoted, for workers), never as raw timeline events
+        events = [e for e in self.board.events(feature, since_event) if e["kind"] not in ("message", "reply")]
         if self.review:  # a later reviewer judges fresh: never another reviewer's verdict on this task
             events = [e for e in events if not (e["task"] == self.task_id and e["kind"] == "status"
                                                 and re.match(r"independent review \d+ of \d+ passed", e["body"] or ""))]
@@ -270,7 +271,9 @@ class BoardTools:
         if messages is not None:
             out["messages_for_you"] = messages  # from the user: follow them
             if not self.review:  # from other workers: information, weigh it against your spec
-                out["messages"] = self.board.messages_for(self.task_id, since_event)
+                seen = self.board.delivered_message_ids(self.task_id)
+                out["messages"] = _quote_messages([m for m in self.board.messages_for(self.task_id, since_event)
+                                                   if m["id"] not in seen])
         return out
 
     @_safe
@@ -509,11 +512,15 @@ class BoardTools:
 
 def _message_counts(board: Board, feature: str) -> dict:
     counts: dict[str, int] = {}
-    for t in board.tasks(feature=feature):
-        n = sum(1 for m in board.thread(t["id"]) if m["kind"] == "message" and m["from"] == t["id"])
-        if n:
-            counts[str(t["id"])] = n
+    for m in board.feature_messages(feature):
+        if m["kind"] == "message" and isinstance(m["from"], int):
+            counts[str(m["from"])] = counts.get(str(m["from"]), 0) + 1
     return counts
+
+
+def _quote_messages(messages: list[dict]) -> list[dict]:
+    from .quoting import quoted
+    return [{**m, "text": quoted(m["text"], 1500)} for m in messages]
 
 
 def _pending_promotions(data) -> list[dict]:

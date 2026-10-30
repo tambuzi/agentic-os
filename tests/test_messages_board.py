@@ -133,3 +133,35 @@ def test_thread(b):
     d = b.send_message(2, 3, "web to mobile")
     assert [x["id"] for x in b.thread(2)] == [a["message"], c["message"], d["message"]]
     assert [x["id"] for x in b.thread(1)] == [a["message"], c["message"]]
+
+
+# -- review fixes ------------------------------------------------------------------
+def test_unanswered_question_gets_the_automatic_reply_when_the_target_finishes(b):
+    # review I4: spec §5 — the target's session ends without answering
+    q = b.send_message(2, 3, "which field?", question=True)
+    b.complete(3, "Mobile uses total_cents", author="w")
+    assert b.open_questions("checkout") == []
+    auto = [m for m in b.messages_for(2) if m["kind"] == "reply" and m["re"] == q["message"]]
+    assert len(auto) == 1 and auto[0]["from"] == "aos" and "Mobile uses total_cents" in auto[0]["text"]
+
+
+def test_automatic_reply_is_from_aos_and_does_not_block_a_real_reply(b):
+    # review I5
+    b.complete(2, "web done", author="w", to="review")
+    q = b.send_message(1, 2, "cents?", question=True)
+    assert b.message(q["auto_reply"])["from"] == "aos"
+    b.reject_review(2, "independent review: missing test")
+    b.claim(2)
+    assert b.reply(2, q["message"], "yes, cents")["reply"]
+
+
+def test_a_target_reply_closes_an_escalated_question_and_answers_are_once(b):
+    # review M1/M2
+    q = b.send_message(2, 1, "is the currency EUR?", escalate=True)
+    b.reply(1, q["message"], "yes")
+    assert b.open_questions("checkout") == []
+    b.complete(3, "done", author="w")
+    q2 = b.send_message(2, 3, "and taxes?", escalate=True)
+    b.answer(q2["message"], "VAT included")
+    with pytest.raises(AosError, match="already"):
+        b.answer(q2["message"], "again")

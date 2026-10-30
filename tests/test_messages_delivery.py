@@ -200,3 +200,25 @@ def test_delivery_errors_are_warnings(env, monkeypatch):
         assert wait_for(lambda: b.task(t2)["status"] == "done", d)      # the dispatcher kept going
     finally:
         stop(d)
+
+
+def test_context_only_lists_messages_up_to_the_launch_mark(configured, data, git_repo, tmp_path):
+    # review I3 (context, then live): a message after the mark is delivered live, not in the context
+    proj = git_repo(tmp_path / "api")
+    save_user_config({**load_user_config(), "projects": {"api": {"path": str(proj), "targets": ["claude"]},
+                                                          "web": {"path": str(proj), "targets": ["claude"]}}})
+    aos = AOS(configured, slug="web")
+    aos.register_project("api")
+    aos.register_project("web")
+    b = Board(data)
+    b.create_feature("checkout", "Checkout")
+    t1 = b.add_task("checkout", "api", "api")
+    t2 = b.add_task("checkout", "web", "web")
+    b.promote()
+    b.claim(t1)
+    early = b.send_message(t1, t2, "before the mark")
+    mark = max(e["id"] for e in b.events("checkout"))
+    b.send_message(t1, t2, "after the mark")
+    ctx = build_worker_context(aos, b, b.claim(t2), messages_upto=mark)
+    assert "before the mark" in ctx and "after the mark" not in ctx
+    assert early["message"] <= mark
