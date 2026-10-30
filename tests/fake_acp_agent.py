@@ -224,12 +224,14 @@ def handle(msg):
         state["cancel"].set()
     elif method == "_session/steering" and TOOL == "claude":
         note("steer", " ".join(b.get("text", "") for b in params.get("prompt") or []))
+        note("steer_by", state["role"])
         send({"jsonrpc": "2.0", "id": rid, "result": {"outcome": "injected"}})
     elif method == "_session/steer" and TOOL == "kiro":
         if not isinstance(params.get("message"), str):
             send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32602, "message": "message must be a string"}})
             return
         note("steer", params["message"])
+        note("steer_by", state["role"])
         send({"jsonrpc": "2.0", "id": rid, "result": {"queued": True}})
     elif method == "test/garbage":
         with lock:

@@ -64,6 +64,7 @@ class Running:
     worktree: Path | None = None
     generation: int = 0               # the attempt token it was launched with
     learn_since: int = 0              # learner: the run is over once a `learned` event follows this id
+    msg_since: int = 0                # last worker message already in the session (context or live)
 
 
 def process_start(pid: int) -> str | None:
@@ -360,7 +361,8 @@ class Dispatcher:
             try:
                 r.acp.session.drain(on_request=lambda rid, m, p, tid=tid, r=r: self._on_agent_request(tid, r, rid, m, p))
                 if r.kind == "worker" and self._still_owns(r, self.board.task(tid)):
-                    self._deliver_steers(tid, r)  # the user's words for the worker, never its reviewer
+                    self._deliver_steers(tid, r)    # the user's words first, never to its reviewer
+                    self._deliver_messages(tid, r)  # then other workers' messages
                 self._service_turn(tid, r)
             except TASK_ERRORS as e:
                 _warn(f"task #{tid}: {e}")
@@ -432,6 +434,42 @@ class Dispatcher:
                 self.board.log_event(tid, "steer_delivered", m["message"])
             else:
                 self.board.log_event(tid, "status", "steer not delivered live; the worker reads it at its next board_read")
+
+    def _deliver_messages(self, tid: int, r: Running) -> None:
+        """Other workers' messages for this task, live, labelled and quoted. A failure is a
+        warning: the worker still sees them at its next board_read."""
+        from .quoting import quoted
+        try:
+            pending = self.board.messages_for(tid, since=r.msg_since)
+        except Exception as e:
+            _warn(f"task #{tid} messages: {e}")
+            return
+        for m in pending:
+            r.msg_since = m["id"]
+            sender = m["from"] if m["from"] == "planner" else f"worker #{m['from']}"
+            project = ""
+            if isinstance(m["from"], int):
+                try:
+                    project = f" ({self.board.task(m['from'])['project']})"
+                except Exception:
+                    project = ""
+            what = "Question" if m["question"] else "Reply" if m["kind"] == "reply" else "Message"
+            label = (f"{what} from {sender}{project}, message #{m['id']}"
+                     f"{' (answer with task_reply)' if m['question'] else ''}: {quoted(m['text'], 1500)}")
+            try:
+                outcome = r.acp.session.steer(label)
+            except Exception as e:  # never let one delivery stop the dispatcher
+                _warn(f"task #{tid}: message #{m['id']} not delivered: {e}")
+                outcome = None
+            try:
+                if outcome == "queued":
+                    self.board.log_event(tid, "message_queued", f"#{m['id']} to #{tid}")
+                elif outcome:
+                    self.board.log_event(tid, "message_delivered", f"#{m['id']} to #{tid}")
+                else:
+                    self.board.log_event(tid, "status", f"message #{m['id']} waits for #{tid}'s next board_read")
+            except Exception as e:
+                _warn(f"task #{tid}: {e}")
 
     def _on_agent_request(self, tid: int, r: Running, req_id, method: str, params: dict) -> None:
         conn = r.acp.conn
@@ -866,6 +904,7 @@ class Dispatcher:
         launch = None
         try:
             aos = AOS(self.aos.repo, home=self.aos.home, slug=t["project"], data=self.aos.data)
+            mark = self._last_event_id(t["feature"])  # before the context is written: nothing falls in between
             spec, settings = prepare_run(aos, self.board, self._run_model(task), wt, project_path, self.aos_bin)
             mod = adapter(settings["adapter"])
             log_path = self.board.data / "logs" / f"{tid}-{task['attempts']}.log"
@@ -881,7 +920,7 @@ class Dispatcher:
                                     getattr(mod, "EXIT_REASONS", {}), t["feature"], t["project"],
                                     generation=task["generation"], started_at=time.monotonic(),
                                     log_path=log_path, acp=acp, allowed=spec.allowed, worktree=spec.worktree,
-                                    steer_since=self._last_event_id(t["feature"]))
+                                    steer_since=mark, msg_since=mark)
         self._last_start = time.monotonic()
         self.board.set_transport(tid, transport)
         session_id = acp.session.session_id if acp else launch.session_id

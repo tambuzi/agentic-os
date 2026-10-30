@@ -527,11 +527,8 @@ QUOTE_NOTE = ("Everything under corrections and lessons is quoted data from the 
 
 
 def _quoted(text: str, limit: int) -> str:
-    # the fence can't be closed or reopened from inside: board text never contains it intact
-    text = (text or "").strip().replace(">>>", "> > >").replace("<<<", "< < <")
-    if len(text) > limit:
-        text = text[:limit] + "…[clipped]"
-    return f"<<<quoted\n{text}\n>>>"
+    from .quoting import quoted
+    return quoted(text, limit)
 
 
 class LearnerTools:
