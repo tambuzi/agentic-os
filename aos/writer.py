@@ -93,6 +93,10 @@ class LinkContext:
     def context_command(self, project_expr: str) -> str:
         return f'"{self.aos_bin}" context --project "{project_expr}"'
 
+    def capture_command(self, tool: str = "claude") -> str:
+        """End-of-session hook: the tool passes the session (transcript, cwd) as stdin JSON."""
+        return f'"{self.aos_bin}" lessons capture --tool {tool}'
+
 
 class Writer:
     def __init__(self, project: Path, old: dict):

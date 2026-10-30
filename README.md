@@ -266,6 +266,15 @@ How lessons are used:
 - **Across projects:** when the same lesson is confirmed in two or more projects (the learner links them), agenticOS proposes it as one **org memory** entry in the inbox. Accept it with `aos inbox apply` or decline it with `aos inbox reject`.
 - `aos lessons learn <task>` asks for a learner run by hand. `learning.enabled: false` turns learning off.
 
+**Your own sessions teach it too.** When a Claude Code session in a linked project ends, aos checks the transcript for your corrections. It looks for "no, use snake_case", "instead put it in utils/", refused tool calls, and the agent fixing its own failed command.
+- Only sessions with corrections get a short background learner run. The others cost nothing.
+- Session lessons start at 0.4, just below the 0.5 needed to reach context, so a one-off change of mind never reaches your agents. A lesson you correct twice, or confirm once (`aos lessons confirm`), does.
+- Nothing from the transcript is stored except the lessons. The queue keeps the transcript's path and fingerprints of the corrections, never their text.
+- `aos lessons sessions` shows the queue, and `aos lessons learn-sessions` processes it now.
+- `aos lessons learn-session --last` learns from your most recent session even without corrections. Use it when you explained a convention instead of correcting one.
+- Settings: `learning.sessions` (the off switch), `learning.sessions_exclude: [project]`, `learning.sessions_daily_budget_usd` (default $1).
+- Kiro sessions: manual trigger only for now.
+
 ### Today vs. next
 
 | Growth path | Status |
@@ -275,7 +284,7 @@ How lessons are used:
 | Humans add knowledge docs by dropping markdown in `data/knowledge/` | ✅ works now |
 | Agent writes long-form knowledge docs itself | ❌ not yet: agents have no `knowledge_write` tool; they save to memory or a skill instead |
 | **Learning loop from the board**: lessons from corrections, ranked into context, promoted to org memory when confirmed in 2+ projects | ✅ works now |
-| Learning from interactive sessions (Claude `Stop`, Kiro `agentStop` hooks) | 🔜 next phase of the learning loop |
+| Learning from your own sessions (Claude Code `SessionEnd` hook; Kiro: manual trigger for now) | ✅ works now |
 | Search past sessions; prune unused or duplicate skills | 🔜 sub-project 3 |
 | Import from Notion/Confluence into `knowledge/` | 🔜 sub-project 4 |
 | Multi-project features with parallel Claude Code / Kiro workers (board) | ✅ works now |
