@@ -25,6 +25,14 @@ def test_context_never_fails(home, tmp_path, capsys):
     assert out.startswith("[aos]") and len(out.strip().splitlines()) == 1
 
 
+def test_context_error_is_one_line_for_a_yaml_parse_error(configured, project, capsys, monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda n: None)
+    assert run(["link", str(project), "--name", "shop", "--no-graphskill"], capsys)[0] == 0
+    (configured / "aos.yaml").write_text("board:\n  parallel: [1,\n  other: x\n")
+    code, out, _ = run(["context", "--project", str(project)], capsys)
+    assert code == 0 and out.startswith("[aos]") and len(out.strip().splitlines()) == 1, out
+
+
 def test_context_unlinked(configured, project, capsys):
     code, out, _ = run(["context", "--project", str(project)], capsys)
     assert code == 0 and "not linked" in out

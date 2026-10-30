@@ -75,6 +75,10 @@ def cmd_sync(a) -> int:
     return 0
 
 
+def _one_line(e: Exception) -> str:
+    return " ".join((e.message if isinstance(e, AosError) else str(e)).split())  # YAML errors span lines
+
+
 def cmd_context(a) -> int:
     """SessionStart hook. Must never fail or print more than one line on error."""
     try:
@@ -90,10 +94,10 @@ def cmd_context(a) -> int:
         try:
             sync(a.project)
         except Exception as e:
-            sync_note = f"[aos] skill sync skipped: {e}\n"
+            sync_note = f"[aos] skill sync skipped: {_one_line(e)}\n"
         sys.stdout.write(sync_note + build_context(AOS(repo, slug=slug)))
     except Exception as e:
-        print(f"[aos] context unavailable: {e}")
+        print(f"[aos] context unavailable: {_one_line(e)}")
     return 0
 
 
