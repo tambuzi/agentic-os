@@ -27,6 +27,9 @@ You run the whole flow in this conversation. The user only steps in for decision
      - `small`: one focused change with its test.
      - `standard`: a feature across a few files, with tests.
      - `large`: cross-cutting work, a new design, security, concurrency or data migrations, or anything ambiguous. It runs on the strongest model.
+
+     `trivial` tasks are accepted once their checks pass, without an independent reviewer, so only use it for genuinely mechanical changes.
+   - mark a task `security=true` when it touches authentication, permissions, sessions, secrets, crypto or untrusted input. Its reviewer then gets a security checklist; aos also detects most of these from the diff by itself.
 7. Show the brief, contract and task list (`#n project title ← depends on`). Adjust until the user approves. **Do not create anything before approval.**
 
 **Which tool runs the workers?**
@@ -36,7 +39,7 @@ You run the whole flow in this conversation. The user only steps in for decision
 - Use `feature_create(..., worker=)` only when the user wants a different tool for this one feature.
 
 ## 2. Create
-8. `feature_create(slug, title, brief, contract)`, then one `task_create(project, title, feature, spec, depends_on, size)` per task.
+8. `feature_create(slug, title, brief, contract)`, then one `task_create(project, title, feature, spec, depends_on, size, security)` per task.
    - Pass `model=` only when the user chose a model by hand. That can be for one task, or for the whole feature with `feature_create(..., model=)`. Otherwise the size decides.
    - If a task fails because it was harder than its size suggested, offer `task_retry(task, note, model=)` with a stronger model.
 

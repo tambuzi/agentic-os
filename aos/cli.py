@@ -349,7 +349,8 @@ def cmd_task(a) -> int:
         spec = Path(a.spec_file).read_text() if a.spec_file else ""
         deps = a.after or []
         tid = board.add_task(a.feature, a.project, a.title, spec, deps, worker=profile,
-                             max_attempts=settings["max_attempts"], model=a.model, size=a.size)
+                             max_attempts=settings["max_attempts"], model=a.model, size=a.size,
+                             security=a.security)
         model, source = resolve_model(aos, board.task(tid))
         print(f"task #{tid} added ({a.project}, worker {profile}, model {model or 'auto'} from {source})")
     elif a.action == "list":
@@ -572,6 +573,8 @@ def _parser() -> argparse.ArgumentParser:
     t.add_argument("--model", help="model for this task, chosen by hand (default: auto from --size, else the tool's)")
     t.add_argument("--size", choices=["trivial", "small", "standard", "large"],
                    help="how big the task is; picks the model tier when no model is chosen by hand")
+    t.add_argument("--security", action="store_true",
+                   help="security-sensitive: its reviewer gets the security checklist")
     t = tsub.add_parser("list")
     t.add_argument("--feature")
     t.add_argument("--status")

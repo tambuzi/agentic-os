@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -159,7 +160,7 @@ class BoardTools:
         return self.board.task(self.task_id)
 
     def _new_task(self, feature: str, project: str, title: str, spec: str, depends_on,
-                  model: str | None = None, size: str | None = None) -> dict:
+                  model: str | None = None, size: str | None = None, security: bool = False) -> dict:
         from .workers.common import check_model, clean_model, resolve_model
         model = clean_model(model) or None
         if project not in self.aos.projects():
@@ -169,7 +170,7 @@ class BoardTools:
         check_model(settings, profile, model)
         tid = self.board.add_task(feature, project, title, spec, depends_on or [], worker=profile,
                                   max_attempts=settings["max_attempts"], created_by=self.author,
-                                  model=model, size=size)
+                                  model=model, size=size, security=security)
         chosen, source = resolve_model(self.aos, self.board.task(tid))
         return {"task": tid, "worker": profile, "model": chosen, "model_source": source}
 
@@ -178,6 +179,8 @@ class BoardTools:
     def task_show(self) -> dict:
         t = self._own()
         self.board.mark_seen(t["id"])
+        if self.review:
+            t = {k: v for k, v in t.items() if k not in ("reviews_passed", "reviews_required")}
         return {"task": t, "feature": self.board.feature(t["feature"]), "brief": self.board.brief(t["feature"]),
                 "contract": self.board.contract(t["feature"]),
                 "depends_on": self.board.dependency_results(t["id"]),
@@ -221,22 +224,26 @@ class BoardTools:
             messages = self.board.steer_messages(t["id"], since_event)
         if not feature:
             raise AosError("feature is required")
-        out = {"events": self.board.events(feature, since_event),
-               "contract_version": self.board.feature(feature)["contract_version"]}
+        events = self.board.events(feature, since_event)
+        if self.review:  # a later reviewer judges fresh: never another reviewer's verdict on this task
+            events = [e for e in events if not (e["task"] == self.task_id and e["kind"] == "status"
+                                                and re.match(r"independent review \d+ of \d+ passed", e["body"] or ""))]
+        out = {"events": events, "contract_version": self.board.feature(feature)["contract_version"]}
         if messages is not None:
             out["messages_for_you"] = messages  # from the user: follow them
         return out
 
     @_safe
     def task_create(self, project: str, title: str, spec: str = "", depends_on: list[int] | None = None,
-                    feature: str | None = None, size: str | None = None, model: str | None = None) -> dict:
+                    feature: str | None = None, size: str | None = None, model: str | None = None,
+                    security: bool = False) -> dict:
         if self.task_id:
             own = self._own()
             Board._check_generation(own, self.attempt)
             feature = own["feature"]
         if not feature:
             raise AosError("feature is required")
-        return self._new_task(feature, project, title, spec, depends_on, model=model, size=size)
+        return self._new_task(feature, project, title, spec, depends_on, model=model, size=size, security=security)
 
     # -- planner mode --------------------------------------------------------
     @_safe
@@ -744,9 +751,10 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
         @mcp.tool()
         def task_create(project: str, title: str, feature: str, spec: str = "",
                         depends_on: list[int] | None = None, size: str | None = None,
-                        model: str | None = None) -> dict:
-            """Add a task for one project to a feature; depends_on lists task ids that must finish first. size: trivial|small|standard|large — picks the model automatically (cheap for trivial, strong for large). model: only when the user chose one by hand."""
-            return bt.task_create(project, title, spec, depends_on, feature=feature, size=size, model=model)
+                        model: str | None = None, security: bool = False) -> dict:
+            """Add a task for one project to a feature; depends_on lists task ids that must finish first. size: trivial|small|standard|large — picks the model automatically (cheap for trivial, strong for large) and trivial tasks skip the independent reviewer. model: only when the user chose one by hand. security: true when the task touches auth, permissions, secrets, crypto or untrusted input (its reviewer gets a security checklist)."""
+            return bt.task_create(project, title, spec, depends_on, feature=feature, size=size, model=model,
+                                  security=security)
 
         @mcp.tool()
         def board_read(feature: str, since_event: int = 0) -> dict:

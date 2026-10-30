@@ -28,7 +28,9 @@ DEFAULTS = {
               "task_budget_credits": None, "feature_budget_credits": None,
               "approval_timeout_min": 30, "stall_min": 10,
               "max_tasks_per_feature": 30, "default_worker": "claude",
-              "verify": True, "verify_timeout_sec": 600, "review": True, "review_timeout_min": 15},
+              "verify": True, "verify_timeout_sec": 600, "review": True, "review_timeout_min": 15,
+              "skip_review_sizes": ["trivial"],  # sizes accepted after verification, without a reviewer
+              "second_review": []},              # sizes (or "security") that need two independent passes
     "workers": {
         "common": {
             "timeout_min": 45,

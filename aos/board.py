@@ -114,7 +114,10 @@ class Board:
                            ("revert_to", "TEXT"),                             # rejected work to undo
                            ("transport", "TEXT"),                             # acp | cli (last attempt)
                            ("model", "TEXT"),                                 # chosen by hand (None = auto)
-                           ("size", "TEXT")):                                 # trivial|small|standard|large
+                           ("size", "TEXT"),                                  # trivial|small|standard|large
+                           ("security", "INTEGER NOT NULL DEFAULT 0"),        # planner: security-sensitive
+                           ("reviews_required", "INTEGER NOT NULL DEFAULT 1"),  # independent passes needed
+                           ("reviews_passed", "INTEGER NOT NULL DEFAULT 0")):
             if name not in cols:  # boards created before the column existed
                 c.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
         if c.execute("SELECT 1 FROM meta WHERE key='learning_since'").fetchone() is None:
@@ -218,7 +221,7 @@ class Board:
     # -- tasks ---------------------------------------------------------------
     def add_task(self, feature: str, project: str, title: str, spec: str = "", depends_on=(),
                  worker: str = "claude", max_attempts: int = 2, created_by: str = "human",
-                 model: str | None = None, size: str | None = None) -> int:
+                 model: str | None = None, size: str | None = None, security: bool = False) -> int:
         check_slug(project)
         if not (title or "").strip():
             raise AosError("task needs a title")
@@ -241,9 +244,9 @@ class Board:
                     raise AosError(f"dependency #{d} is not a task of feature {feature!r}")
             cur = c.execute(
                 "INSERT INTO tasks(feature, project, title, spec, status, worker, max_attempts, "
-                "updated, created_by, model, size) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "updated, created_by, model, size, security) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (feature, project, title.strip(), spec or "", "todo", worker, int(max_attempts),
-                 now(), created_by, model or None, size or None))
+                 now(), created_by, model or None, size or None, 1 if security else 0))
             tid = cur.lastrowid
             c.executemany("INSERT INTO deps(task, depends_on) VALUES (?,?)", [(tid, d) for d in deps])
             self._event(c, feature, tid, "status", created_by,
@@ -570,7 +573,7 @@ class Board:
     def _accept(self, c, tid: int, detail: str, author: str, kind: str) -> None:
         t = self._transition(c, tid, ("review",), "done", author, f"done: {detail[:160]}",
                              note=None, resume=0, resume_hint=0, last_failure=None, feedback=None,
-                             review_stage=None, review_attempts=0)
+                             review_stage=None, review_attempts=0, reviews_passed=0, reviews_required=1)
         self._event(c, t["feature"], int(tid), kind, author, detail)
 
     def _reject(self, c, tid: int, findings: str, author: str) -> None:
@@ -580,7 +583,8 @@ class Board:
         why = " (same failure twice: retrying won't help)" if repeated else ""
         self._transition(c, tid, ("review",), to, author, f"attempt {t['attempts']} not accepted{why} → {to}",
                          feedback=findings, last_failure=findings, resume_hint=0,
-                         review_stage=None, review_attempts=0, revert_to=t["base_commit"])
+                         review_stage=None, review_attempts=0, revert_to=t["base_commit"],
+                         reviews_passed=0, reviews_required=1)
         self._event(c, t["feature"], int(tid), "rejected", author, findings)
 
     def accept(self, tid: int, detail: str, author: str = "dispatcher", kind: str = "verified") -> None:
@@ -609,14 +613,18 @@ class Board:
             c.execute("UPDATE tasks SET review_stage='verified', updated=? WHERE id=?", (now(), int(tid)))
             self._event(c, t["feature"], int(tid), "verified", author, detail)
 
-    def start_review(self, tid: int) -> dict:
-        """verified -> reviewing. The reviewer gets its own attempt token (generation)."""
+    def start_review(self, tid: int, required: int = 1) -> dict:
+        """verified -> reviewing. The reviewer gets its own attempt token (generation).
+        `required`: independent passes this attempt needs (risky tasks: 2)."""
         with self._tx() as c:
             t = self._in_review(c, tid, "verified")
-            c.execute("UPDATE tasks SET review_stage='reviewing', review_attempts=?, generation=?, updated=? "
-                      "WHERE id=?", (t["review_attempts"] + 1, t["generation"] + 1, now(), int(tid)))
+            required = max(int(required), t["reviews_required"] if t["reviews_passed"] else 1)
+            c.execute("UPDATE tasks SET review_stage='reviewing', review_attempts=?, generation=?, "
+                      "reviews_required=?, updated=? WHERE id=?",
+                      (t["review_attempts"] + 1, t["generation"] + 1, required, now(), int(tid)))
+            n = f" ({t['reviews_passed'] + 1} of {required})" if required > 1 else ""
             self._event(c, t["feature"], int(tid), "status", "dispatcher",
-                        f"independent review {t['review_attempts'] + 1} started")
+                        f"independent review {t['review_attempts'] + 1} started{n}")
         return self.task(tid)
 
     def review_verdict(self, tid: int, ok: bool, text: str, generation: int | None = None,
@@ -628,7 +636,14 @@ class Board:
             t = self._task_row(c, tid)
             self._check_generation(t, generation)
             self._in_review(c, tid, "reviewing")
-            if ok:
+            if ok and t["reviews_passed"] + 1 < t["reviews_required"]:
+                # one more independent pass needed: a fresh reviewer, its own round of tries
+                c.execute("UPDATE tasks SET review_stage='verified', reviews_passed=?, review_attempts=0, "
+                          "updated=? WHERE id=?", (t["reviews_passed"] + 1, now(), int(tid)))
+                self._event(c, t["feature"], int(tid), "status", who,
+                            f"independent review {t['reviews_passed'] + 1} of {t['reviews_required']} passed: "
+                            f"{text.strip()[:300]}")
+            elif ok:
                 self._accept(c, tid, f"reviewed: {text.strip()}", who, "reviewed")
             else:
                 self._reject(c, tid, f"independent review: {text.strip()}", who)
@@ -639,8 +654,10 @@ class Board:
         with self._tx() as c:
             t = self._in_review(c, tid, "reviewing")
             if t["review_attempts"] >= 2:
-                self._accept(c, tid, f"accepted without independent review (reviewer failed twice: {reason})",
-                             "dispatcher", "review_skipped")
+                what = (f"accepted with {t['reviews_passed']} of {t['reviews_required']} independent reviews passed "
+                        f"(the next reviewer failed twice: {reason})" if t["reviews_passed"]
+                        else f"accepted without independent review (reviewer failed twice: {reason})")
+                self._accept(c, tid, what, "dispatcher", "review_skipped")
             else:
                 c.execute("UPDATE tasks SET review_stage='verified', updated=? WHERE id=?", (now(), int(tid)))
                 self._event(c, t["feature"], int(tid), "status", "dispatcher",

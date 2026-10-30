@@ -4,7 +4,15 @@ All notable changes to agenticOS. Format: [Keep a Changelog](https://keepachange
 
 Releases before 0.7.0 were numbered after the fact, one per merged pull request, and are not tagged yet.
 
-## [0.8.0] — unreleased (`feat/model-per-task`)
+## [0.9.0] — unreleased (`feat/review-depth`)
+
+### Added
+- **Trivial tasks skip the independent reviewer** once their checks pass (`board.skip_review_sizes`, default `[trivial]`).
+- **Security-focused review.** A change marked by the planner (`aos task add --security`, `task_create(security=true)`), or detected by fixed rules from its file paths and added lines, gets a reviewer with a security checklist. Any real security finding fails the review. The timeline records why.
+- **Optional second independent reviewer** for risky tasks: `board.second_review: [large, security]`. Both passes are needed, each reviewer starts fresh, and the retry rule for flaky reviewers restarts for each round.
+- The `aos-feature` planner marks security-sensitive tasks and only sizes genuinely mechanical changes as `trivial`.
+
+## [0.8.0] — 2026-10-30 (PR #9)
 
 ### Added
 - **Model per task, set by hand:**
