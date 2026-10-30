@@ -73,3 +73,8 @@ def test_master_skill_reports_lessons():
 def test_master_skill_handles_worker_questions():
     text = (ROOT / "skills/aos-feature/SKILL.md").read_text()
     assert "message_answer" in text and "questions" in text and "open_questions" in text
+
+
+def test_master_skill_gives_each_task_an_operation():
+    text = (ROOT / "skills/aos-feature/SKILL.md").read_text()
+    assert "operation" in text and "refactor" in text

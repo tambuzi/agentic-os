@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 
 SIZES = ("trivial", "small", "standard", "large")  # a task's size picks its model in auto mode
+OPERATIONS = ("feature", "change", "fix", "refactor")  # what kind of work: sets the first move
 FINISHED_FOR_MESSAGES = ("review", "done", "failed")  # a question to these gets the automatic reply
 
 
@@ -118,6 +119,7 @@ class Board:
                            ("model", "TEXT"),                                 # chosen by hand (None = auto)
                            ("size", "TEXT"),                                  # trivial|small|standard|large
                            ("security", "INTEGER NOT NULL DEFAULT 0"),        # planner: security-sensitive
+                           ("operation", "TEXT"),                             # feature|change|fix|refactor
                            ("reviews_required", "INTEGER NOT NULL DEFAULT 1"),  # independent passes needed
                            ("reviews_passed", "INTEGER NOT NULL DEFAULT 0")):
             if name not in cols:  # boards created before the column existed
@@ -225,12 +227,15 @@ class Board:
     # -- tasks ---------------------------------------------------------------
     def add_task(self, feature: str, project: str, title: str, spec: str = "", depends_on=(),
                  worker: str = "claude", max_attempts: int = 2, created_by: str = "human",
-                 model: str | None = None, size: str | None = None, security: bool = False) -> int:
+                 model: str | None = None, size: str | None = None, security: bool = False,
+                 operation: str | None = None) -> int:
         check_slug(project)
         if not (title or "").strip():
             raise AosError("task needs a title")
         if size and size not in SIZES:
             raise AosError(f"size must be one of {', '.join(SIZES)}, not {size!r}")
+        if operation and operation not in OPERATIONS:
+            raise AosError(f"operation must be one of {', '.join(OPERATIONS)}, not {operation!r}")
         deps = sorted({int(d) for d in (depends_on or [])})
         with self._tx() as c:
             f = c.execute("SELECT status FROM features WHERE slug=?", (feature,)).fetchone()
@@ -248,9 +253,9 @@ class Board:
                     raise AosError(f"dependency #{d} is not a task of feature {feature!r}")
             cur = c.execute(
                 "INSERT INTO tasks(feature, project, title, spec, status, worker, max_attempts, "
-                "updated, created_by, model, size, security) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "updated, created_by, model, size, security, operation) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (feature, project, title.strip(), spec or "", "todo", worker, int(max_attempts),
-                 now(), created_by, model or None, size or None, 1 if security else 0))
+                 now(), created_by, model or None, size or None, 1 if security else 0, operation or None))
             tid = cur.lastrowid
             c.executemany("INSERT INTO deps(task, depends_on) VALUES (?,?)", [(tid, d) for d in deps])
             self._event(c, feature, tid, "status", created_by,

@@ -14,7 +14,7 @@ from pathlib import Path
 import yaml
 
 from . import inbox
-from .board import Board
+from .board import OPERATIONS, Board
 from .config import aos_home, data_root, load_user_config, repo_root, save_user_config, slug_for_path
 from .core import AOS
 from .errors import AosError
@@ -371,7 +371,7 @@ def cmd_task(a) -> int:
         deps = a.after or []
         tid = board.add_task(a.feature, a.project, a.title, spec, deps, worker=profile,
                              max_attempts=settings["max_attempts"], model=a.model, size=a.size,
-                             security=a.security)
+                             security=a.security, operation=a.op)
         model, source = resolve_model(aos, board.task(tid))
         print(f"task #{tid} added ({a.project}, worker {profile}, model {model or 'auto'} from {source})")
     elif a.action == "list":
@@ -381,7 +381,8 @@ def cmd_task(a) -> int:
         t = board.task(a.id)
         model, source = resolve_model(aos, t)
         shown = {k: t[k] for k in ("id", "feature", "project", "title", "status", "worker")}
-        shown.update({"model": f"{model or 'auto'} ({source})", "size": t.get("size")})
+        shown.update({"model": f"{model or 'auto'} ({source})", "size": t.get("size"),
+                      "operation": t.get("operation")})
         shown.update({k: t[k] for k in ("attempts", "max_attempts", "depends_on", "result", "note")})
         print(yaml.safe_dump(shown, sort_keys=False, allow_unicode=True), end="")
         if t["spec"]:
@@ -505,7 +506,7 @@ def cmd_board(a) -> int:
             cost = _cost_text(board.task_cost(t["id"]), board.task_cost(t["id"], "credit"))
             print(f"  #{t['id']:<4} {t['project']:<14} {t['status']:<10} {tools[t['id']]:<{width}} "
                   f"{t['attempts']}/{t['max_attempts']}"
-                  f"{f'  {cost}' if cost else ''}  {t['title']}{extra}")
+                  f"{f'  {cost}' if cost else ''}  {_op_tag(t)}{t['title']}{extra}")
         for q in board.open_questions(f["slug"]):
             print(f"  question #{q['id']} from #{q['from']} to #{q['to']}: {q['text'][:80]}"
                   + ("  (escalated: answer with message_answer)" if q["escalated"] else ""))
@@ -515,6 +516,10 @@ def cmd_board(a) -> int:
         for p in board.proposals(f["slug"], "pending"):
             print(f"  proposal #{p['id']} pending: {p['reason']}  (aos feature approve|reject {p['id']})")
     return 0
+
+
+def _op_tag(t: dict) -> str:
+    return f"[{t['operation']}] " if t.get("operation") else ""
 
 
 def _positive_int(value: str) -> int:
@@ -615,6 +620,8 @@ def _parser() -> argparse.ArgumentParser:
                    help="how big the task is; picks the model tier when no model is chosen by hand")
     t.add_argument("--security", action="store_true",
                    help="security-sensitive: its reviewer gets the security checklist")
+    t.add_argument("--op", choices=list(OPERATIONS),
+                   help="what kind of work: sets the worker's first move and what its reviewer checks")
     t = tsub.add_parser("list")
     t.add_argument("--feature")
     t.add_argument("--status")
