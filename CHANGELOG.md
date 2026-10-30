@@ -4,7 +4,11 @@ All notable changes to agenticOS. Format: [Keep a Changelog](https://keepachange
 
 Releases before 0.7.0 were numbered after the fact, one per merged pull request, and are not tagged yet.
 
-## [0.9.0] — unreleased (`feat/review-depth`)
+## [0.9.1] — unreleased (`fix/deferred-minors`)
+
+### Fixed
+
+## [0.9.0] — 2026-10-30 (PR #10)
 
 ### Added
 - **Trivial tasks skip the independent reviewer** once their checks pass (`board.skip_review_sizes`, default `[trivial]`).
