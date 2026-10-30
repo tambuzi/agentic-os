@@ -23,6 +23,7 @@ DOMAINS = ("testing", "api", "database", "security", "style", "workflow", "tooli
 EVIDENCE_KINDS = ("review_fail", "verify_fail", "retry", "steer", "permission_denied", "block", "human")
 TRIGGER_MAX, ACTION_MAX = 120, 300
 ACTIVE = ("unreviewed", "confirmed")
+_ID = re.compile(r"[a-z0-9-]+")
 
 _SECRET = re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S{8,}"
                      r"|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|xox[abp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}"
@@ -144,6 +145,11 @@ def _render(lesson: Lesson) -> str:
 
 class LessonStore:
     def __init__(self, data: str | Path, project: str):
+        from .config import check_slug
+        try:
+            check_slug(project)  # never a path: `..` or `a/b` would leave lessons/
+        except AosError as e:
+            raise LessonError(e.message, e.hint)
         self.data = Path(data)
         self.project = project
         self.dir = _dir(self.data, project)
@@ -152,6 +158,9 @@ class LessonStore:
     def list(self, include_inactive: bool = True) -> tuple[list[Lesson], list[str]]:
         found, warnings = [], []
         for p in sorted(self.dir.glob("*.md")) if self.dir.is_dir() else []:
+            if not _ID.fullmatch(p.stem):  # could never be shown, confirmed or rejected
+                warnings.append(f"lesson file {p} skipped: its name is not a lesson id (a-z, 0-9, '-')")
+                continue
             try:
                 lesson = _parse(p, self.project)
             except Exception as e:  # a hand edit gone wrong must never break context or the board
@@ -163,7 +172,7 @@ class LessonStore:
 
     def get(self, lid: str) -> Lesson:
         p = self.dir / f"{lid}.md"
-        if not re.fullmatch(r"[a-z0-9-]+", lid or "") or not p.is_file():
+        if not _ID.fullmatch(lid or "") or not p.is_file():
             raise LessonError(f"no lesson {self.project}/{lid}")
         try:
             return _parse(p, self.project)
@@ -311,8 +320,9 @@ def _neg_date(iso: str) -> int:
 
 # -- across projects ---------------------------------------------------------------
 def all_projects(data: str | Path) -> list[str]:
+    from .config import SLUG_RE
     root = Path(data) / "lessons"
-    return sorted(p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")) if root.is_dir() else []
+    return sorted(p.name for p in root.iterdir() if p.is_dir() and SLUG_RE.match(p.name)) if root.is_dir() else []
 
 
 def find(data: str | Path, ref: str) -> Lesson | None:
