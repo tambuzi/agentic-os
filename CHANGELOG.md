@@ -7,6 +7,24 @@ Releases before 0.7.0 were numbered after the fact, one per merged pull request,
 ## [0.9.1] — unreleased (`fix/deferred-minors`)
 
 ### Fixed
+- After a dispatcher crash, a review that was in progress is retried instead of staying stuck, and stale Kiro agent files of reviewers and learners are removed.
+- Denying or expiring a permission request resets the stall clock, like approving does, so a run isn't marked stalled right after a long wait.
+- `aos board run --worker` refuses an unknown tool up front with a clean error.
+- `aos board run --worker` no longer switches the tool of a task marked resume; the timeline says why.
+- `aos board` and `board_status` show Kiro credits (`cost_credits`), not only USD.
+- The ACP run log is closed when the agent process can't start.
+- The tool/model/transport column of `aos board` grows to fit long model ids.
+- A shell command whose title looks like `scripts/x.sh` is no longer treated as an MCP tool.
+- Approving with `--always` a request that has no reusable rule says it was allowed once, instead of "(always)".
+- A lesson rejected automatically by `lesson_contradict` is noted on the task's timeline.
+- A declined promotion is not proposed again when a third project links into its group.
+- Promotions are staged under a lock, so the dispatcher and a CLI confirm can't stage duplicates.
+- An applied promotion marks only the group's confirmed lessons as promoted.
+- Lesson project names are checked (no `..` or paths); only valid slugs count as lesson projects.
+- A lesson file whose name isn't a lesson id is skipped with a warning, like a broken file.
+- `aos doctor` checks that the models in `aos.yaml` (default, learning model, tiers) fit their tool.
+- `aos context` error output is always one line (YAML parse errors spanned several).
+- `aos sync` only writes the manifest when it changed.
 
 ## [0.9.0] — 2026-10-30 (PR #10)
 

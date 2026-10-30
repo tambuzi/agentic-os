@@ -162,8 +162,8 @@ Let workers in the same feature talk directly, on top of ACP live delivery. Toda
 
 ## Known small issues (from reviews)
 
-- [ ] `aos context` error output can span several lines for YAML parse errors.
-- [ ] The manifest is rewritten on every sync even when nothing changed.
+- [x] `aos context` error output can span several lines for YAML parse errors.
+- [x] The manifest is rewritten on every sync even when nothing changed.
 - [ ] Unlink restores JSON with the same meaning but not byte-for-byte (indentation, non-ASCII escaping).
 - [ ] No lock around `render_project` / `save_user_config` for concurrent sessions.
 - [ ] `aos doctor` doesn't report owned files the user edited by hand ("drift").
