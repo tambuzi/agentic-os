@@ -4,7 +4,9 @@ All notable changes to agenticOS. Format: [Keep a Changelog](https://keepachange
 
 Releases before 0.7.0 were numbered after the fact, one per merged pull request, and are not tagged yet.
 
-## [0.10.0] — unreleased (`feat/worker-messages-impl`)
+## [0.11.0] — unreleased (`feat/operation-types`)
+
+## [0.10.0] — 2026-10-30 (PRs #12, #13, #14)
 
 ### Added
 - **Worker-to-worker messages** within a feature: heads-up broadcasts (`task_broadcast`), direct questions (`task_message(..., question=true)`) and their answers (`task_reply`). They are recorded on the board and delivered live to running workers like steers; a worker that hasn't started finds them in its context.
