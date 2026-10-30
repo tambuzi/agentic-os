@@ -23,6 +23,8 @@ from .quoting import quoted
 from .store import locked, read_text, write_atomic
 
 TURN_CHARS, TOOL_CHARS = 1500, 300
+MAX_HITS = 20              # per capture: the most recent corrections
+SELF_FIX_LOOKAHEAD = 8     # turns after a failed command in which its fix must appear
 BEFORE, AFTER = 3, 1
 REFUSED = "The user doesn't want to proceed with this tool use"
 # the first words of a user message that corrects the agent (English, Spanish). "para" (stop)
@@ -31,6 +33,8 @@ _CORRECTION = re.compile(
     r"(?i)^\s*(no\b|nope\b|don'?t\b|do not\b|stop\b|wrong\b|that'?s not\b|not like that\b|instead\b|"
     r"actually\b|revert\b|undo\b|eso no\b|mal\b|en vez de\b|en lugar de\b|deshaz\b|revierte\b|para\s*[.!,]*\s*$)")
 _BARE_NO = re.compile(r"(?i)^\s*(no|nope)[.!]?\s*$")
+_POLITE = re.compile(r"(?i)^\s*(no|nope)[\s,.!]*(thanks|thank you|all good|that'?s all|that'?s it|we'?re good)"
+                     r"|^\s*actually[\s,.!]*(great|perfect|good|yes|fine|looks good|sounds good|go ahead)")
 
 
 @dataclass
@@ -74,51 +78,66 @@ def read_claude_transcript(path: str | Path, max_bytes: int = 4_000_000) -> list
     tools: dict[str, tuple[str, str]] = {}
     for line in _tail_lines(Path(path), max_bytes):
         try:
-            e = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(e, dict) or e.get("type") not in ("user", "assistant") or e.get("isMeta") or e.get("isSidechain"):
-            continue
-        content = (e.get("message") or {}).get("content")
-        if e["type"] == "user" and isinstance(content, list) and any(
-                isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
-            for b in content:
-                if isinstance(b, dict) and b.get("type") == "tool_result":
-                    out = _text(b.get("content"))
-                    name, inp = tools.get(b.get("tool_use_id"), (None, None))
-                    turns.append(Turn(len(turns), "tool", out, name, inp, bool(b.get("is_error")), REFUSED in out))
-            continue
-        if e["type"] == "user":
-            text = _text(content).strip()
-            if text:
-                turns.append(Turn(len(turns), "user", text))
-            continue
-        for b in content if isinstance(content, list) else [{"type": "text", "text": _text(content)}]:
-            if not isinstance(b, dict):
-                continue
-            if b.get("type") == "text" and (b.get("text") or "").strip():
-                turns.append(Turn(len(turns), "assistant", b["text"].strip()))
-            elif b.get("type") == "tool_use":
-                inp = json.dumps(b.get("input") or {}, separators=(",", ":"), sort_keys=True)
-                tools[b.get("id")] = (b.get("name"), inp)
-                turns.append(Turn(len(turns), "assistant", "", b.get("name"), inp))
+            _read_entry(json.loads(line), turns, tools)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            continue  # one odd line never drops the rest of the transcript
     return turns
+
+
+def _read_entry(e, turns: list[Turn], tools: dict) -> None:
+    """One transcript entry → turns (tool results are matched to their calls)."""
+    if not isinstance(e, dict) or e.get("type") not in ("user", "assistant") or e.get("isMeta") or e.get("isSidechain"):
+        return
+    content = (e.get("message") or {}).get("content")
+    if e["type"] == "user" and isinstance(content, list) and any(
+            isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "tool_result":
+                out = _text(b.get("content"))
+                name, inp = tools.get(b.get("tool_use_id"), (None, None))
+                turns.append(Turn(len(turns), "tool", out, name, inp, bool(b.get("is_error")), REFUSED in out))
+        return
+    if e["type"] == "user":
+        text = _text(content).strip()
+        if text:
+            turns.append(Turn(len(turns), "user", text))
+        return
+    for b in content if isinstance(content, list) else [{"type": "text", "text": _text(content)}]:
+        if not isinstance(b, dict):
+            continue
+        if b.get("type") == "text" and (b.get("text") or "").strip():
+            turns.append(Turn(len(turns), "assistant", b["text"].strip()))
+        elif b.get("type") == "tool_use":
+            inp = json.dumps(b.get("input") or {}, separators=(",", ":"), sort_keys=True)
+            tools[b.get("id")] = (b.get("name"), inp)
+            turns.append(Turn(len(turns), "assistant", "", b.get("name"), inp))
+
+
+def _program(t: Turn) -> str:
+    """The program and subcommand of a shell call ("npm test", "git commit")."""
+    try:
+        cmd = json.loads(t.input or "{}").get("command") or ""
+    except ValueError:
+        cmd = ""
+    return " ".join(str(cmd).split()[:2])
 
 
 def find_corrections(turns: list[Turn]) -> list[Hit]:
     hits: list[Hit] = []
+    said = ""  # the agent's last words, for "no" answering its own question
     for i, t in enumerate(turns):
+        if t.role == "assistant" and t.text:
+            said = t.text
         if t.role == "user" and i and turns[i - 1].role in ("assistant", "tool") and _CORRECTION.match(t.text):
-            said = next((p.text for p in reversed(turns[:i]) if p.role == "assistant" and p.text), "")
-            if not (_BARE_NO.match(t.text) and said.rstrip().endswith("?")):
+            if not (_BARE_NO.match(t.text) and said.rstrip().endswith("?")) and not _POLITE.match(t.text):
                 hits.append(Hit(i, "correction"))
         elif t.role == "tool" and t.refused:
             hits.append(Hit(i, "refused_tool"))
-        elif t.role == "tool" and t.error and t.tool:
-            later = [u for u in turns[i + 1:] if u.role == "tool" and u.tool][:3]
-            if any(u.tool == t.tool and u.input != t.input and not u.error for u in later):
+        elif t.role == "tool" and t.error and t.tool == "Bash" and _program(t):
+            later = [u for u in turns[i + 1: i + 1 + SELF_FIX_LOOKAHEAD] if u.role == "tool" and u.tool == "Bash"][:3]
+            if any(u.input != t.input and _program(u) == _program(t) and not u.error for u in later):
                 hits.append(Hit(i, "self_fix"))
-    return hits
+    return hits[-MAX_HITS:]
 
 
 def _show(t: Turn) -> str:
@@ -213,12 +232,23 @@ def enqueue(data, tool: str, session: str, project: str, project_dir: str, trans
     return entry
 
 
-def claim(data, entry_id: str) -> dict | None:
-    """pending → running, once: a second job gets None."""
+def _stale(e: dict, stale_after_s: float | None) -> bool:
+    if e.get("status") != "running" or stale_after_s is None:
+        return False
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(e.get("updated") or e["created"])).total_seconds()
+    except (ValueError, KeyError):
+        return True
+    return age > stale_after_s
+
+
+def claim(data, entry_id: str, stale_after_s: float | None = None) -> dict | None:
+    """pending → running, once: a second job gets None. A `running` entry older than
+    `stale_after_s` lost its job (sleep, reboot, kill) and is taken over."""
     path = _path(data, entry_id)
     with locked(path):
         e = _load(path)
-        if not e or e.get("status") != "pending":
+        if not e or not (e.get("status") == "pending" or _stale(e, stale_after_s)):
             return None
         e["status"] = "running"
         _save(data, e)
@@ -276,14 +306,16 @@ def _log(data, msg: str) -> None:
         pass
 
 
-def _launch(entry_id: str) -> None:
-    """Start the background learner for one entry, detached from the hook."""
-    from .config import aos_home
-    log = Path(aos_home()) / "data" / "logs" / "sessions.log"
+def _launch(entry_id: str, data=None) -> None:
+    """Start the background learner for one entry, detached from the hook. It runs from the
+    data dir, so a project's own `aos.py` can't shadow agenticOS on Python's path."""
+    from .config import data_root
+    data = Path(data or data_root())
+    log = data / "logs" / "sessions.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "a") as out:
         subprocess.Popen([sys.executable, "-m", "aos", "lessons", "learn-session", entry_id],
-                         stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True,
+                         cwd=str(data), stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True,
                          env={**os.environ})
 
 
@@ -292,7 +324,7 @@ def capture(home, data, settings: dict, tool: str, transcript, session: str | No
     """Called by the end-of-session hook: find corrections and queue them. Fast, never raises."""
     try:
         learning = settings.get("learning") or {}
-        if not learning.get("sessions", True):
+        if not learning.get("enabled", True) or not learning.get("sessions", True):
             return "off"
         pdir = Path(project_dir or ".").expanduser().resolve()
         for automated in (Path(home) / "worktrees", Path(data) / "runs"):
@@ -307,13 +339,21 @@ def capture(home, data, settings: dict, tool: str, transcript, session: str | No
         if tool != "claude":
             return f"{tool} capture not available yet"
         turns = read_claude_transcript(transcript)
-        hits = [{"key": hit_key(turns[h.index], h.kind), "kind": h.kind} for h in find_corrections(turns)]
+        hits, keys = [], set()
+        for h in find_corrections(turns):
+            key = hit_key(turns[h.index], h.kind)
+            if key not in keys:
+                keys.add(key)
+                hits.append({"key": key, "kind": h.kind})
         if not hits:
             return "no corrections"
         entry = enqueue(data, tool, session or Path(transcript).stem, slug, pdir, transcript, hits)
         if not entry:
             return "nothing new"
-        (launch or globals()["_launch"])(entry["id"])
+        if launch:
+            launch(entry["id"])
+        else:
+            globals()["_launch"](entry["id"], data)
         return f"queued {entry['id']}"
     except Exception as e:  # the hook must never break or slow the user's session
         _log(data, f"capture failed: {type(e).__name__}: {e}")

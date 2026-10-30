@@ -29,8 +29,7 @@ valid answer when the user simply changed their mind."""
 
 
 def _aos_command() -> list[str]:
-    exe = shutil.which("aos")
-    return [exe] if exe else [sys.executable, "-m", "aos"]
+    return [sys.executable, "-m", "aos"]  # the same install that runs this job
 
 
 def _costs_file(data) -> Path:
@@ -141,15 +140,16 @@ def _run_cli(aos: AOS, settings: dict, spec, log_path: Path, timeout_s: float) -
 def learn_entry(aos: AOS, entry_id: str) -> str:
     """Process one queued session. Returns "<outcome>: <detail>"; never raises."""
     data = aos.data
-    e = sessions.claim(data, entry_id)
+    learning = aos.settings.get("learning") or {}
+    stale_after = 60 * float(learning.get("learner_timeout_min", 5)) + 120
+    e = sessions.claim(data, entry_id, stale_after_s=stale_after)
     if not e:
         return "skipped: not pending (taken by another job, done, or unknown)"
     try:
-        learning = aos.settings.get("learning") or {}
-        budget = float(learning.get("sessions_daily_budget_usd") or 0)
-        if budget and spent_today(data) >= budget:
+        budget = learning.get("sessions_daily_budget_usd")  # None: no limit; 0: spend nothing
+        if budget is not None and spent_today(data) >= float(budget):
             sessions.release(data, entry_id, "daily budget reached; waits for tomorrow")
-            return f"deferred: daily budget of ${budget:.2f} reached"
+            return f"deferred: daily budget of ${float(budget):.2f} reached"
         if e["tool"] != "claude":
             sessions.finish(data, entry_id, ok=False, reason=f"{e['tool']} sessions can't be learned from yet")
             return "failed: unsupported tool"
@@ -178,8 +178,12 @@ def learn_entry(aos: AOS, entry_id: str) -> str:
 
 
 def learn_pending(aos: AOS, limit: int = 5) -> list[str]:
+    """Pending entries, and running ones whose job died; also prunes old done/failed ones."""
     sessions.prune(aos.data)
-    return [learn_entry(aos, e["id"]) for e in sessions.entries(aos.data, "pending")[:limit]]
+    stale_after = 60 * float((aos.settings.get("learning") or {}).get("learner_timeout_min", 5)) + 120
+    todo = [e for e in sessions.entries(aos.data)
+            if e.get("status") == "pending" or sessions._stale(e, stale_after)]
+    return [learn_entry(aos, e["id"]) for e in todo[:limit]]
 
 
 def learn_last(aos: AOS, project_dir, tool: str = "claude") -> str:

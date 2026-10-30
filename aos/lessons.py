@@ -25,9 +25,14 @@ TRIGGER_MAX, ACTION_MAX = 120, 300
 ACTIVE = ("unreviewed", "confirmed")
 _ID = re.compile(r"[a-z0-9-]+")
 
-_SECRET = re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S{8,}"
-                     r"|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|xox[abp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}"
-                     r"|-----BEGIN [A-Z ]*PRIVATE KEY")
+_SECRET = re.compile(
+    r"""(?i:["']?\b(api[_-]?key|access[_-]?token|refresh[_-]?token|private[_-]?key|client[_-]?secret|token|secret|"""
+    r"""password|passwd|authorization)["']?\s*[:=]\s*["']?[^\s"',]{8,})"""          # key: value, "key":"value"
+    r"""|\b[A-Z][A-Z0-9_]*_(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)\s*[:=]\s*\S{8,}"""  # FOO_SECRET=…
+    r"""|(?i:\bbearer\s+[A-Za-z0-9._~+/=-]{8,})"""
+    r"""|\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@"""                               # scheme://user:pw@
+    r"""|sk-[A-Za-z0-9_-]{16,}|sk_live_[A-Za-z0-9]{10,}|ghp_[A-Za-z0-9]{20,}|xox[abp]-[A-Za-z0-9-]{10,}"""
+    r"""|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY""")
 _CODE_LINE = re.compile(r"^(\s{4,}|\t)\S|^\s*(def|class|function)\s+\w+\s*[(:{]|^\s*from\s+\S+\s+import\s"
                         r"|[{}].*;|;.*[{}]|=>")
 _DANGEROUS = re.compile(r"(?i)git\s+push|--no-verify|core\.hookspath|\bsudo\b|rm\s+-\w*[rf]"

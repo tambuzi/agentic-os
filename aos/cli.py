@@ -197,7 +197,9 @@ def cmd_doctor(a) -> int:
     line(True, f"lessons: {count} in {len(projects)} project{'s' if len(projects) != 1 else ''}")
     from . import sessions as S
     pending, failed = S.entries(aos.data, "pending"), S.entries(aos.data, "failed")
-    line(not failed, f"session learning: {len(pending)} pending, {len(failed)} failed")
+    running = S.entries(aos.data, "running")
+    line(not failed, f"session learning: {len(pending)} pending, {len(failed)} failed"
+                     + (f", {len(running)} running" if running else ""))
     for e in failed:
         line(False, f"session {e['id']} ({e['project']}): {e.get('reason') or 'failed'}")
     return 0
@@ -284,6 +286,8 @@ def _lessons_sessions(aos: AOS, a, words: list[str]) -> int:
     if len(words) != 2:
         raise AosError("usage: aos lessons learn-session <id> | --last [--project-dir DIR]")
     print(session_learner.learn_entry(aos, words[1]))
+    for r in session_learner.learn_pending(aos, limit=3):  # the next job retries what waited or failed
+        print(r)
     return 0
 
 

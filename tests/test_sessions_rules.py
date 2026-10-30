@@ -107,3 +107,49 @@ def test_reader_only_reads_the_tail_of_a_huge_file(tmp_path):
     turns = read_claude_transcript(write(tmp_path, entries), max_bytes=200_000)
     assert len(turns) < 1000 and turns[-1].text == "no, use snake_case"
     assert [h.kind for h in find_corrections(turns)] == ["correction"]
+
+
+# -- review fixes ------------------------------------------------------------------
+def test_self_fix_needs_the_same_shell_command(tmp_path):
+    # review I2: a failing TDD step followed by an unrelated command is not a self-fix
+    red = [user("add mul"), use("t1", "Bash", command="pytest -q"), result("t1", "1 failed", error=True),
+           use("t2", "Bash", command="git status"), result("t2", "clean")]
+    assert kinds(tmp_path, red) == []
+    edit = [user("rename"), use("t1", "Edit", file_path="a.py"), result("t1", "old_string not found", error=True),
+            use("t2", "Edit", file_path="b.py"), result("t2", "ok")]
+    assert kinds(tmp_path, edit) == []
+
+
+@pytest.mark.parametrize("reply", ["No thanks, that's all", "no, thank you", "Actually, great, go ahead",
+                                   "actually perfect", "nope, all good"])
+def test_polite_endings_are_not_corrections(tmp_path, reply):
+    assert kinds(tmp_path, [user("add a module"), say("Done. Anything else?"), user(reply)]) == []
+    assert kinds(tmp_path, [user("add a module"), say("Done."), user(reply)]) == []
+
+
+def test_one_odd_line_does_not_drop_the_transcript(tmp_path):
+    entries = [user("add a module"), {"type": "user", "message": "hi"}, {"type": "assistant", "message": None},
+               say("I created MyModule.py"), user("no, use snake_case")]
+    assert kinds(tmp_path, entries) == ["correction"]
+
+
+def test_rules_are_fast_on_many_failed_commands(tmp_path):
+    import time
+    entries = [user("go")]
+    for i in range(4000):
+        entries += [use(f"t{i}", "Bash", command=f"make target{i}"), result(f"t{i}", "boom", error=True)]
+    turns = read_claude_transcript(write(tmp_path, entries), max_bytes=4_000_000)
+    start = time.monotonic()
+    find_corrections(turns)
+    assert time.monotonic() - start < 0.5
+
+
+@pytest.mark.parametrize("text", ['{"password":"hunter2hunter2"}', "AWS_SECRET_ACCESS_KEY=AKIAabcdefghijklmnop12",
+                                  "Authorization: Bearer abc.def.ghi-jkl", "postgres://user:s3cretpw@db.host/app",
+                                  "sk_live_abcdefghijklmnop1234", '{"api_key": "zzzzzzzzzzzzzzzz"}',
+                                  "GITHUB_TOKEN=ghx_abcdefghijklmnop"])
+def test_secret_formats_are_scrubbed(text):
+    # review I6
+    from aos.lessons import contains_secret, scrub_secrets
+    assert contains_secret(text)
+    assert "[secret removed]" in scrub_secrets(text)

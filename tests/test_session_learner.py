@@ -114,3 +114,30 @@ def test_cli_sessions_and_doctor_line(env, capsys):
     assert "done" in capsys.readouterr().out
     assert main(["doctor"]) == 0
     assert "session learning: 0 pending, 0 failed" in capsys.readouterr().out
+
+
+# -- review fixes ------------------------------------------------------------------
+def test_a_job_also_retries_other_pending_entries(env, tmp_path, project, monkeypatch):
+    # review I4: the next session's job picks up what was deferred or failed before
+    aos, entry, tmp_path, data = env
+    t2 = write(tmp_path, [user("add x"), say("Created X.py"), user("instead put it in utils/")], "t2.jsonl")
+    sessions.capture(aos.home, data, aos.settings, "claude", t2, "s2", project, launch=lambda i: None)
+    second = [e for e in sessions.entries(data) if e["session"] == "s2"][0]
+    assert main(["lessons", "learn-session", second["id"]]) == 0
+    assert {e["status"] for e in sessions.entries(data)} == {"done"}
+
+
+def test_zero_budget_means_spend_nothing(env):
+    # review M13
+    aos, entry, tmp_path, data = env
+    aos.settings["learning"]["sessions_daily_budget_usd"] = 0
+    assert "budget" in learn_entry(aos, entry["id"])
+
+
+def test_background_job_runs_python_from_the_data_dir(monkeypatch, data):
+    # review M9/M10: a project's own aos.py must not shadow agenticOS; logs go to the data dir
+    calls = []
+    monkeypatch.setattr(sessions.subprocess, "Popen", lambda argv, **kw: calls.append((argv, kw)))
+    sessions._launch("20261030-000000-claude-abcdef", data)
+    argv, kw = calls[0]
+    assert argv[:3] == [sys.executable, "-m", "aos"] and Path(kw["cwd"]) == Path(data)

@@ -111,7 +111,7 @@ def test_capture_reads_the_hook_stdin(env, monkeypatch, capsys):
     import io
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(
         {"session_id": "abc", "transcript_path": str(t), "cwd": str(project), "hook_event_name": "SessionEnd"})))
-    monkeypatch.setattr(sessions, "_launch", lambda entry_id: launched.append(entry_id))
+    monkeypatch.setattr(sessions, "_launch", lambda entry_id, data=None: launched.append(entry_id))
     assert main(["lessons", "capture", "--tool", "claude"]) == 0
     [entry] = sessions.entries(data)
     assert entry["session"] == "abc" and launched == [entry["id"]]
@@ -150,3 +150,48 @@ def test_claim_finish_retry_and_prune(env):
     assert sessions.entries(data)[0]["status"] == "failed"
     assert sessions.prune(data, days=7) == 0
     assert sessions.prune(data, days=0) == 1 and sessions.entries(data) == []
+
+
+# -- review fixes ------------------------------------------------------------------
+def test_learning_disabled_turns_session_learning_off(env):
+    # review I5
+    configured, data, home, project, tmp_path, launched = env
+    s = AOS(configured).settings
+    off = {**s, "learning": {**s["learning"], "enabled": False}}
+    assert cap(env, corrected(tmp_path), settings=off) == "off"
+
+
+def test_hits_are_deduplicated_and_capped(env):
+    # review M7
+    configured, data, home, project, tmp_path, launched = env
+    entries = [user("start")]
+    for i in range(60):
+        entries += [say(f"Created Module{i}.py"), user(f"no, use snake_case for module {i}")]
+    entries += [say("Created X.py"), user("no, use snake_case for module 0")]   # an exact repeat
+    cap(env, write(tmp_path, entries))
+    [e] = sessions.entries(data)
+    keys = [h["key"] for h in e["hits"]]
+    assert len(keys) == len(set(keys)) and len(keys) <= sessions.MAX_HITS
+
+
+def test_a_running_entry_whose_job_died_is_reclaimed(env):
+    # review I3
+    configured, data, home, project, tmp_path, launched = env
+    cap(env, corrected(tmp_path))
+    [e] = sessions.entries(data)
+    assert sessions.claim(data, e["id"])
+    assert sessions.claim(data, e["id"]) is None                  # a live job holds it
+    stale = sessions.entry(data, e["id"])
+    stale["updated"] = "2000-01-01T00:00:00+00:00"
+    (sessions.queue_dir(data) / f"{e['id']}.json").write_text(json.dumps(stale))
+    assert sessions.claim(data, e["id"], stale_after_s=600)        # the job died: take it over
+    assert sessions.entry(data, e["id"])["status"] == "running"
+
+
+def test_the_hook_has_a_timeout(configured, project, monkeypatch):
+    # review I1: Claude Code gives SessionEnd hooks 1.5 s unless the hook says otherwise
+    from aos.link import link
+    monkeypatch.setattr("shutil.which", lambda n: "/bin/aos" if n == "aos" else None)
+    link(project, slug="demo")
+    hooks = json.loads((project / ".claude/settings.local.json").read_text())["hooks"]["SessionEnd"]
+    assert hooks[0]["hooks"][0]["timeout"] >= 10

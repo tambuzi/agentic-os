@@ -24,7 +24,7 @@ def end_hooks(p):
 def test_link_installs_the_session_end_hook(env):
     link(env, slug="shop")
     [group] = end_hooks(env)
-    assert group["hooks"] == [{"type": "command", "command": '"/bin/aos" lessons capture --tool claude'}]
+    assert group["hooks"] == [{"type": "command", "command": '"/bin/aos" lessons capture --tool claude', "timeout": 15}]
 
 
 def test_relink_does_not_duplicate(env):
