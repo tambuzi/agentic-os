@@ -418,7 +418,7 @@ def settle_promotion(data: str | Path, refs: list[str], applied: bool) -> None:
     """The user decided an org promotion in the inbox."""
     group = [l for l in (find(data, r) for r in refs) if l is not None]
     for l in group:
-        fields = {"promotion": None, **({"promoted_to": "org"} if applied else {})}
+        fields = {"promotion": None, **({"promoted_to": "org"} if applied and l.status == "confirmed" else {})}
         LessonStore(data, l.project).set_fields(l.id, **fields)
     if not applied and group:
         decline(data, group)

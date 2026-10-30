@@ -64,6 +64,19 @@ def test_apply_promotes(aos, capsys):
     assert lessons.stage_promotions(aos) == []
 
 
+def test_apply_marks_only_confirmed_lessons_promoted(aos, capsys):
+    api, a, web, w = linked(aos)
+    api.decide(a.id, True)
+    billing = LessonStore(aos.data, "billing")
+    b = billing.new("when adding a table", "Add a migration in billing.", "database", EV,
+                    same_as=[f"web/{w.id}"], general_rule="Ship a migration with every new table.")
+    [pid] = lessons.stage_promotions(aos)
+    assert billing.get(b.id).promotion == pid
+    assert main(["inbox", "apply", pid]) == 0
+    assert api.get(a.id).promoted_to == "org" and web.get(w.id).promoted_to == "org"
+    assert billing.get(b.id).promoted_to is None and billing.get(b.id).promotion is None
+
+
 def test_reject_declines_for_good(aos, capsys):
     api, a, web, w = linked(aos)
     api.decide(a.id, True)
