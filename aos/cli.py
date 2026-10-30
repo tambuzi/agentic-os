@@ -182,6 +182,7 @@ def cmd_doctor(a) -> int:
          else "node not found (needed only for Claude over ACP)")
     for name in ("claude", "kiro"):
         line(*acp_tools.status(name, profile_settings(aos, name, ""), aos_home()))
+    _doctor_models(aos, line)
     from . import lessons as L
     count, projects = 0, L.all_projects(aos.data)
     for p in projects:
@@ -191,6 +192,22 @@ def cmd_doctor(a) -> int:
             line(False, w)
     line(True, f"lessons: {count} in {len(projects)} project{'s' if len(projects) != 1 else ''}")
     return 0
+
+
+def _doctor_models(aos: AOS, line) -> None:
+    """One line per tool: do the models configured in aos.yaml fit it?"""
+    from .workers.common import _fits, profile_settings
+    for name in sorted(n for n in aos.settings["workers"] if n != "common"):
+        try:
+            s = profile_settings(aos, name, "")
+        except AosError as e:
+            line(False, f"models {name}: {e.message}")
+            continue
+        configured = [(s.get(k), k) for k in ("model", "learning_model")]
+        configured += [(m, f"tiers.{size}") for size, m in (s.get("tiers") or {}).items()]
+        bad = [f"{m} ({where})" for m, where in configured if m and not _fits(s, name, m)]
+        line(not bad, f"models {name}: " + (f"don't fit {name}: {', '.join(bad)} (see workers.{name} in aos.yaml)"
+                                            if bad else "fit"))
 
 
 def cmd_lessons(a) -> int:

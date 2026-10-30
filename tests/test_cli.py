@@ -59,6 +59,22 @@ def test_doctor(configured, capsys):
     assert code == 0 and "repo" in out
 
 
+def test_doctor_checks_configured_models_fit_their_tool(configured, capsys):
+    (configured / "aos.yaml").write_text(
+        "workers:\n"
+        "  claude: {model: gpt-5, tiers: {large: claude-sonnet-4.5}}\n"
+        "  kiro: {tiers: {small: haiku}}\n")
+    code, out, _ = run(["doctor"], capsys)
+    lines = out.splitlines()
+    claude = next(l for l in lines if l.startswith("warn  models claude"))
+    assert "gpt-5 (model)" in claude and "claude-sonnet-4.5 (tiers.large)" in claude
+    kiro = next(l for l in lines if l.startswith("warn  models kiro"))
+    assert "haiku (tiers.small)" in kiro
+    (configured / "aos.yaml").write_text("workers:\n  claude: {model: sonnet}\n")
+    out = run(["doctor"], capsys)[1]
+    assert "ok    models claude" in out and "ok    models kiro" in out
+
+
 def test_init_rejects_data_dir_inside_repo(repo, home, capsys):
     code, _, err = run(["init", str(repo), "--data-dir", str(repo / "data")], capsys)
     assert code == 1 and "outside" in err
