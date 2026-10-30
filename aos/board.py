@@ -8,6 +8,7 @@ cycles cannot be formed.
 
 from __future__ import annotations
 
+import json
 import re
 
 import sqlite3
@@ -57,7 +58,8 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 
-SIZES = ("trivial", "small", "standard", "large")  # a task's size picks its model in auto mode
+SIZES = ("trivial", "small", "standard", "large")
+FINISHED_FOR_MESSAGES = ("review", "done", "failed")  # a question to these gets the automatic reply  # a task's size picks its model in auto mode
 
 
 def now() -> str:
@@ -481,6 +483,169 @@ class Board:
         return [{"id": e["id"], "ts": e["ts"], "message": e["body"], "now": e["kind"] == "steer_now"}
                 for e in self.events(t["feature"], since)
                 if e["task"] == t["id"] and e["kind"] in ("steer", "steer_now")]
+
+    # -- worker messages (spec 2026-10-30) -----------------------------------------
+    def _attempt_start(self, c, tid: int) -> int:
+        row = c.execute("SELECT max(id) FROM events WHERE task=? AND kind='status' AND body LIKE 'attempt % started'",
+                        (int(tid),)).fetchone()
+        return row[0] or 0
+
+    @staticmethod
+    def _parse_message(e) -> dict:
+        body = json.loads(e["body"])
+        return {"id": e["id"], "ts": e["ts"], "kind": e["kind"], "author": e["author"], "feature": e["feature"],
+                "from": body.get("from"), "to": body.get("to"), "question": bool(body.get("question")),
+                "escalated": bool(body.get("escalated")), "text": body.get("text", ""), "re": body.get("re")}
+
+    def _message_rows(self, c, feature: str, since: int = 0) -> list[dict]:
+        rows = c.execute("SELECT * FROM events WHERE feature=? AND kind IN ('message','reply') AND id>? ORDER BY id",
+                         (feature, int(since))).fetchall()
+        out = []
+        for e in rows:
+            try:
+                out.append(self._parse_message(e))
+            except (ValueError, TypeError):
+                continue
+        return out
+
+    @staticmethod
+    def _message_settings(settings: dict | None) -> dict:
+        return {"enabled": True, "max_per_attempt": 5, "max_chars": 1500, **(settings or {})}
+
+    def _check_text(self, text: str, s: dict) -> str:
+        from .lessons import contains_secret
+        text = (text or "").strip()
+        if not text:
+            raise AosError("message is empty")
+        if len(text) > int(s["max_chars"]):
+            raise AosError(f"message is {len(text)} characters; keep it under {s['max_chars']}")
+        if contains_secret(text):
+            raise AosError("message looks like it contains a secret; never send secrets to other workers")
+        return text
+
+    def send_message(self, tid: int, to, text: str, question: bool = False, escalate: bool = False,
+                     author: str | None = None, settings: dict | None = None) -> dict:
+        """A note or question from a task's worker to another task of its feature, or "all".
+        A question to a finished task gets an automatic reply; escalate=True sends it to the
+        planner instead. No worker ever waits for an answer."""
+        s = self._message_settings(settings)
+        if not s["enabled"]:
+            raise AosError("worker messages are disabled (board.messages.enabled)")
+        text = self._check_text(text, s)
+        question = bool(question or escalate)
+        with self._tx() as c:
+            src = self._task_row(c, tid)
+            target = None
+            if to != "all":
+                try:
+                    to = int(to)
+                except (TypeError, ValueError):
+                    raise AosError(f"send to a task id or \"all\", not {to!r}")
+                if to == src["id"]:
+                    raise AosError("you can't message yourself; use task_comment for the timeline")
+                row = c.execute("SELECT * FROM tasks WHERE id=?", (to,)).fetchone()
+                if not row:
+                    raise AosError(f"unknown task #{to}", "board_read lists the feature's tasks")
+                target = dict(row)
+                if target["feature"] != src["feature"]:
+                    raise AosError(f"task #{to} belongs to another feature; messages stay within a feature")
+                if target["status"] == "cancelled":
+                    raise AosError(f"task #{to} was cancelled; nobody will read it")
+            since = self._attempt_start(c, src["id"])
+            mine = [m for m in self._message_rows(c, src["feature"], since)
+                    if m["kind"] == "message" and m["from"] == src["id"]]
+            if any(m["to"] == to and m["text"] == text for m in mine):
+                raise AosError("you already sent this message in this attempt")
+            if len(mine) >= int(s["max_per_attempt"]):
+                raise AosError(f"limit of {s['max_per_attempt']} messages per attempt reached; use task_comment "
+                               "for the timeline, or task_block if you need a human")
+            body = {"from": src["id"], "to": to, "question": question, "escalated": bool(escalate), "text": text, "re": None}
+            cur = c.execute("INSERT INTO events(feature, task, ts, kind, author, body) VALUES (?,?,?,?,?,?)",
+                            (src["feature"], src["id"], now(), "message", author or f"task:{src['id']}", json.dumps(body)))
+            mid = cur.lastrowid
+            auto, finished = None, target is not None and target["status"] in FINISHED_FOR_MESSAGES
+            if finished and question and not escalate:
+                first = (target["result"] or "").strip().splitlines()[0] if (target["result"] or "").strip() else "(no result)"
+                reply = (f"task #{target['id']} ({target['project']}) is {target['status']}; its worker has ended. "
+                         f"Its result: {first}. Its commits are on branch feature/{target['feature']} in the "
+                         f"{target['project']} worktree. If you need more, ask again with escalate=true and the "
+                         f"planner will answer.")
+                rb = {"from": target["id"], "to": src["id"], "question": False, "escalated": False, "text": reply, "re": mid}
+                auto = c.execute("INSERT INTO events(feature, task, ts, kind, author, body) VALUES (?,?,?,?,?,?)",
+                                 (src["feature"], target["id"], now(), "reply", "aos", json.dumps(rb))).lastrowid
+        return {"message": mid, "delivered": "recorded" if finished else "queued", "auto_reply": auto}
+
+    def reply(self, tid: int, message_id: int, text: str, author: str | None = None,
+              settings: dict | None = None) -> dict:
+        """Answer a question addressed to you (directly or to "all"), once. Replies don't count
+        toward the limit, so a reply is only ever to a question: exchanges stay bounded."""
+        s = self._message_settings(settings)
+        text = self._check_text(text, s)
+        with self._tx() as c:
+            me = self._task_row(c, tid)
+            q = self._one_message(c, message_id)
+            if q["kind"] != "message" or not q["question"]:
+                raise AosError(f"#{message_id} isn't a question; reply only answers questions")
+            if not (q["to"] == me["id"] or (q["to"] == "all" and q["from"] != me["id"])) or q["feature"] != me["feature"]:
+                raise AosError(f"question #{message_id} isn't addressed to you")
+            if any(m["kind"] == "reply" and m["re"] == q["id"] and m["from"] == me["id"]
+                   for m in self._message_rows(c, me["feature"], q["id"])):
+                raise AosError(f"you already answered #{message_id}")
+            body = {"from": me["id"], "to": q["from"], "question": False, "escalated": False, "text": text, "re": q["id"]}
+            rid = c.execute("INSERT INTO events(feature, task, ts, kind, author, body) VALUES (?,?,?,?,?,?)",
+                            (me["feature"], me["id"], now(), "reply", author or f"task:{me['id']}", json.dumps(body))).lastrowid
+        return {"reply": rid}
+
+    def answer(self, message_id: int, text: str, author: str = "planner") -> dict:
+        """The planner's (or user's) answer to an escalated question."""
+        text = self._check_text(text, self._message_settings(None))
+        with self._tx() as c:
+            q = self._one_message(c, message_id)
+            if q["kind"] != "message" or not q["escalated"]:
+                raise AosError(f"#{message_id} isn't an escalated question; the worker it asked answers it")
+            body = {"from": "planner", "to": q["from"], "question": False, "escalated": False, "text": text, "re": q["id"]}
+            rid = c.execute("INSERT INTO events(feature, task, ts, kind, author, body) VALUES (?,?,?,?,?,?)",
+                            (q["feature"], q["from"], now(), "reply", author, json.dumps(body))).lastrowid
+        return {"reply": rid}
+
+    def _one_message(self, c, mid: int) -> dict:
+        e = c.execute("SELECT * FROM events WHERE id=? AND kind IN ('message','reply')", (int(mid),)).fetchone()
+        if not e:
+            raise AosError(f"no message #{mid}")
+        return self._parse_message(e)
+
+    def message(self, mid: int) -> dict:
+        with closing(self._connect()) as c:
+            return self._one_message(c, mid)
+
+    def messages_for(self, tid: int, since: int = 0) -> list[dict]:
+        """Messages and replies addressed to a task (directly, or "all" from someone else)."""
+        t = self.task(tid)
+        with closing(self._connect()) as c:
+            rows = self._message_rows(c, t["feature"], since)
+        return [m for m in rows if m["to"] == t["id"] or (m["to"] == "all" and m["from"] != t["id"])]
+
+    def thread(self, tid: int) -> list[dict]:
+        t = self.task(tid)
+        with closing(self._connect()) as c:
+            rows = self._message_rows(c, t["feature"])
+        return [m for m in rows if m["from"] == t["id"] or m["to"] == t["id"] or (m["to"] == "all" and m["from"] != t["id"])]
+
+    def open_questions(self, feature: str) -> list[dict]:
+        """Questions nobody answered yet; an escalated one stays open until the planner answers."""
+        with closing(self._connect()) as c:
+            rows = self._message_rows(c, feature)
+        replies = [m for m in rows if m["kind"] == "reply"]
+        out = []
+        for q in rows:
+            if q["kind"] != "message" or not q["question"]:
+                continue
+            answers = [r for r in replies if r["re"] == q["id"]]
+            if q["escalated"]:
+                answers = [r for r in answers if r["from"] == "planner"]
+            if not answers:
+                out.append(q)
+        return out
 
     def set_model(self, tid: int, model: str | None, author: str = "dispatcher", why: str = "") -> None:
         with self._tx() as c:
