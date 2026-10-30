@@ -4,7 +4,18 @@ All notable changes to agenticOS. Format: [Keep a Changelog](https://keepachange
 
 Releases before 0.7.0 were numbered after the fact, one per merged pull request, and are not tagged yet.
 
-## [0.11.0] — unreleased (`feat/operation-types`)
+## [0.12.0] — unreleased (`feat/session-learning`)
+
+### Added
+- **Learning from your own sessions.** When a Claude Code session in a linked project ends, its end-of-session hook (`aos link` installs it) checks the transcript with fixed rules. The rules look for your corrections ("no / don't / instead / actually …", also in Spanish), refused tool calls, and the agent fixing its own failed command.
+  - Only sessions with corrections get a short background learner run (cheap model, lesson tools only). Others cost nothing.
+  - Session lessons start at 0.4, below the context threshold. They reach your agents once the same lesson is seen again or you confirm it.
+  - The queue (`<data>/sessions/queue`) stores the transcript path and correction fingerprints, never transcript text, and retries failed runs up to 3 times.
+  - Commands: `aos lessons sessions`, `aos lessons learn-sessions`, `aos lessons learn-session <id> | --last` (the manual trigger). `aos doctor` shows the queue.
+  - Settings: `learning.sessions`, `sessions_exclude`, `sessions_daily_budget_usd` (default $1/day).
+- Kiro sessions: a probe (`spikes/kiro-session-capture`) to find how Kiro exposes a finished conversation. Until then, only the manual trigger.
+
+## [0.11.0] — 2026-10-30 (PR #15)
 
 ### Added
 - **Operation types** for board tasks: `feature`, `change`, `fix` or `refactor`, optional (an untagged task works as before). Set with `aos task add --op` or `task_create(operation=)` (planner and worker tools); an unknown value is refused with the allowed list.

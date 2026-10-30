@@ -93,6 +93,10 @@ class LinkContext:
     def context_command(self, project_expr: str) -> str:
         return f'"{self.aos_bin}" context --project "{project_expr}"'
 
+    def capture_command(self, tool: str = "claude") -> str:
+        """End-of-session hook: the tool passes the session (transcript, cwd) as stdin JSON."""
+        return f'"{self.aos_bin}" lessons capture --tool {tool}'
+
 
 class Writer:
     def __init__(self, project: Path, old: dict):
@@ -183,13 +187,19 @@ class Writer:
             node[last] = value
             self._save_json(rel, data)
 
-    def hook(self, rel: str, event: str, command: str) -> None:
+    def hook(self, rel: str, event: str, command: str, timeout: int | None = None) -> None:
         data = self._load_json(rel)
         check_hooks_shape(rel, data)
         groups = data.setdefault("hooks", {}).setdefault(event, [])
         self.hooks.append({"file": rel, "event": event, "command": command})
-        if not any(h.get("command") == command for g in groups for h in g.get("hooks", [])):
-            groups.append({"hooks": [{"type": "command", "command": command}]})
+        mine = [h for g in groups for h in g.get("hooks", []) if h.get("command") == command]
+        if not mine:
+            entry = {"type": "command", "command": command, **({"timeout": timeout} if timeout else {})}
+            groups.append({"hooks": [entry]})
+            self._save_json(rel, data)
+        elif timeout and any(h.get("timeout") != timeout for h in mine):
+            for h in mine:
+                h["timeout"] = timeout
             self._save_json(rel, data)
 
     def block(self, rel: str, lines: list[str]) -> None:

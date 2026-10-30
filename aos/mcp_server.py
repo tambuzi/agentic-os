@@ -544,20 +544,37 @@ class LearnerTools:
     """A learner run's tools: read one finished task's corrections, write lessons for its
     project (validated, at most `max_ops` changes), then finish (spec 2026-10-09 §5.2)."""
 
-    def __init__(self, aos: AOS, board: Board, task: int, max_ops: int = 3):
+    def __init__(self, aos: AOS, board: Board, task: int | None = None, max_ops: int = 3,
+                 session_entry: dict | None = None):
         from datetime import date
         self.aos, self.board = aos, board
-        self.task = board.task(int(task))
         self.max_ops, self.ops, self.done = int(max_ops), 0, False
-        self.signals = {s["event"]: s for s in board.correction_signals(self.task["id"])}
         self.today = date.today()
+        self.session = session_entry  # learning from one of the user's sessions instead of a board task
+        if self.session:
+            from .sessions import entry_excerpts
+            self.task, self.project = None, self.session["project"]
+            self.excerpts = {e["id"]: e for e in entry_excerpts(self.session)}
+        else:
+            self.task = board.task(int(task))
+            self.project = self.task["project"]
+            self.signals = {s["event"]: s for s in board.correction_signals(self.task["id"])}
 
     def _store(self):
         from .lessons import LessonStore
-        return LessonStore(self.aos.data, self.task["project"])
+        return LessonStore(self.aos.data, self.project)
 
     def _evidence(self, events) -> list[dict]:
         from .lessons import LessonError
+        if self.session:
+            ids = [int(e) for e in (events or [])]
+            bad = [e for e in ids if e not in self.excerpts]
+            if not ids or bad:
+                raise LessonError(f"evidence_events must be excerpt ids of this session: {sorted(self.excerpts)} "
+                                  f"(not {bad or 'empty'})")
+            return [{"kind": "session", "tool": self.session["tool"], "session": self.session["session"],
+                     "turns": [self.excerpts[e]["turn"] for e in ids],
+                     "correction": self.excerpts[ids[0]]["kind"], "at": self.today.isoformat()}]
         ids = [int(e) for e in (events or [])]
         bad = [e for e in ids if e not in self.signals]
         if not ids or bad:
@@ -582,8 +599,22 @@ class LearnerTools:
         self.ops += 1
         return {"ok": True, "id": lesson.id, "confidence": lesson.confidence, "status": lesson.status}
 
+    def _others(self) -> list[dict]:
+        from .lessons import LessonStore, all_projects
+        return [{"ref": l.ref, "trigger": l.trigger, "action": l.action}
+                for p in all_projects(self.aos.data) if p != self.project
+                for l in LessonStore(self.aos.data, p).list()[0] if l.status == "confirmed"]
+
     def learning_input(self) -> dict:
         from .lessons import LessonStore, all_projects
+        if self.session:
+            own = self._store().list()[0]
+            return {"session": {"tool": self.session["tool"], "project": self.project},
+                    "corrections": list(self.excerpts.values()),
+                    "lessons": [{"id": l.id, "trigger": l.trigger, "action": l.action, "status": l.status,
+                                 "confidence": l.confidence} for l in own],
+                    "other_projects": self._others(), "max_changes": self.max_ops,
+                    "note": QUOTE_NOTE.replace("from the board", "from the user's session")}
         t = self.task
         corrections = [{"event": s["event"], "kind": s["kind"],
                         "text": _quoted(s["text"], 1500 if s["kind"] == "verify_fail" else 2000)}
@@ -611,7 +642,7 @@ class LearnerTools:
 
     def lesson_contradict(self, id: str, evidence_events: list[int], why: str) -> dict:
         r = self._write(lambda: self._store().contradict(id, self._evidence(evidence_events), why))
-        if r.get("ok") and r["status"] == "rejected":  # the store has no board: the timeline is noted here
+        if r.get("ok") and r["status"] == "rejected" and self.task:  # the store has no board: the timeline is noted here
             self.board.log_event(self.task["id"], "status",
                                  f"lesson {self.task['project']}/{r['id']} rejected automatically "
                                  f"(confidence {r['confidence']:g}): {' '.join(str(why).split())[:300]}",
@@ -621,6 +652,11 @@ class LearnerTools:
     def learning_done(self, summary: str) -> dict:
         if self.done:
             return {"ok": True, "already": True}
+        if self.session:
+            from .sessions import finish
+            finish(self.aos.data, self.session["id"], ok=True, reason=(summary or "").strip()[:500] or "done")
+            self.done = True
+            return {"ok": True}
         self.board.mark_learned(self.task["id"], (summary or "").strip()[:500] or "done",
                                 author=f"learner:{self.task['id']}")
         self.done = True
@@ -910,7 +946,7 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
 
 
 def run_server(project: str | Path, task: int | None = None, attempt: int | None = None,
-               review: bool = False, learn: bool = False) -> None:
+               review: bool = False, learn: bool = False, learn_session: str | None = None) -> None:
     from .link import sync
 
     cfg = load_user_config()
@@ -926,10 +962,17 @@ def run_server(project: str | Path, task: int | None = None, attempt: int | None
     cwd = os.getcwd()
     os.chdir(Path.home())  # FastMCP reads .env from cwd; keep project env files out of it
     try:
-        if learn:
+        if learn or learn_session:
             board = Board(aos.data, aos.settings["board"]["max_tasks_per_feature"])
             max_ops = int((aos.settings.get("learning") or {}).get("max_ops_per_run", 3))
-            mcp = build_learner_server(LearnerTools(aos, board, int(task), max_ops))
+            if learn_session:
+                from .sessions import entry
+                found = entry(aos.data, learn_session)
+                if not found:
+                    raise AosError(f"no queued session {learn_session!r}", "aos lessons sessions")
+                mcp = build_learner_server(LearnerTools(aos, board, max_ops=max_ops, session_entry=found))
+            else:
+                mcp = build_learner_server(LearnerTools(aos, board, int(task), max_ops))
         else:
             mcp = build_server(Tools(aos, on_skills_changed=resync),
                                BoardTools(aos, task_id=task, attempt=attempt, review=review))

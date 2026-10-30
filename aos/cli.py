@@ -105,7 +105,7 @@ def cmd_serve(a) -> int:
     from .mcp_server import run_server
     if a.learn and (a.review or a.task is None):
         raise AosError("--learn needs --task and cannot be combined with --review")
-    run_server(a.project, a.task, a.attempt, a.review, learn=a.learn)
+    run_server(a.project, a.task, a.attempt, a.review, learn=a.learn, learn_session=a.learn_session)
     return 0
 
 
@@ -195,6 +195,13 @@ def cmd_doctor(a) -> int:
         for w in warnings:
             line(False, w)
     line(True, f"lessons: {count} in {len(projects)} project{'s' if len(projects) != 1 else ''}")
+    from . import sessions as S
+    pending, failed = S.entries(aos.data, "pending"), S.entries(aos.data, "failed")
+    running = S.entries(aos.data, "running")
+    line(not failed, f"session learning: {len(pending)} pending, {len(failed)} failed"
+                     + (f", {len(running)} running" if running else ""))
+    for e in failed:
+        line(False, f"session {e['id']} ({e['project']}): {e.get('reason') or 'failed'}")
     return 0
 
 
@@ -216,8 +223,12 @@ def _doctor_models(aos: AOS, line) -> None:
 
 def cmd_lessons(a) -> int:
     from . import lessons as L
-    aos = AOS(repo_root())
     words = list(a.args or [])
+    if words[:1] == ["capture"]:
+        return _lessons_capture(a)
+    aos = AOS(repo_root())
+    if words[:1] in (["sessions"], ["learn-sessions"], ["learn-session"]):
+        return _lessons_sessions(aos, a, words)
     if words and words[0] in ("show", "confirm", "reject", "learn"):
         if len(words) != 2:
             raise AosError(f"usage: aos lessons {words[0]} {'<task>' if words[0] == 'learn' else '<project>/<id>'}")
@@ -252,6 +263,57 @@ def cmd_lessons(a) -> int:
                 shown += 1
     if not shown:
         print("no lessons yet" if not a.all else "no lessons")
+    return 0
+
+
+def _lessons_sessions(aos: AOS, a, words: list[str]) -> int:
+    from . import session_learner, sessions
+    if words[0] == "sessions":
+        found = sessions.entries(aos.data)
+        if not found:
+            print("no sessions queued")
+        for e in found:
+            print(f"{e['id']:<34} {e['tool']:<6} {e['project']:<14} {e['status']:<8} tries {e['tries']}"
+                  f"{'  ' + e['reason'] if e.get('reason') else ''}")
+        return 0
+    if words[0] == "learn-sessions":
+        results = session_learner.learn_pending(aos)
+        print("\n".join(results) if results else "nothing pending")
+        return 0
+    if a.last:
+        print(session_learner.learn_last(aos, a.project_dir or ".", a.tool or "claude"))
+        return 0
+    if len(words) != 2:
+        raise AosError("usage: aos lessons learn-session <id> | --last [--project-dir DIR]")
+    print(session_learner.learn_entry(aos, words[1]))
+    for r in session_learner.learn_pending(aos, limit=3):  # the next job retries what waited or failed
+        print(r)
+    return 0
+
+
+def _lessons_capture(a) -> int:
+    """The end-of-session hook: always exits 0, prints one short line."""
+    from . import sessions
+    try:
+        transcript, session, project_dir = a.transcript, a.session, a.project_dir
+        if not transcript and not sys.stdin.isatty():
+            try:
+                hook = json.loads(sys.stdin.read() or "{}")
+            except ValueError:
+                hook = {}
+            transcript = hook.get("transcript_path")
+            session = session or hook.get("session_id")
+            project_dir = project_dir or hook.get("cwd")
+        aos = AOS(repo_root())
+        status = sessions.capture(aos.home, aos.data, aos.settings, a.tool or "claude", transcript or "",
+                                  session, project_dir or ".")
+    except Exception as e:
+        status = f"error: {type(e).__name__}"
+        try:
+            sessions._log(data_root(), f"capture failed: {e}")
+        except Exception:
+            pass
+    print(f"[aos] session learning: {status}")
     return 0
 
 
@@ -574,6 +636,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--attempt", type=int, help="board worker mode: the attempt (generation) this worker owns")
     s.add_argument("--review", action="store_true", help="board reviewer mode: review_pass / review_fail only")
     s.add_argument("--learn", action="store_true", help="board learner mode: lesson tools only")
+    s.add_argument("--learn-session", help="session learner mode for this queue entry: lesson tools only")
     s.set_defaults(fn=cmd_serve)
 
     s = sub.add_parser("inbox", help="review staged memory/skill proposals")
@@ -668,6 +731,11 @@ def _parser() -> argparse.ArgumentParser:
                                          "show|confirm|reject <project>/<id>, learn <task>")
     s.add_argument("args", nargs="*")
     s.add_argument("--all", action="store_true", help="include rejected and superseded lessons")
+    s.add_argument("--tool", choices=["claude", "kiro"], help="capture: the tool whose session ended")
+    s.add_argument("--transcript", help="capture: the session transcript (default: the hook's stdin JSON)")
+    s.add_argument("--session", help="capture: the session id")
+    s.add_argument("--project-dir", help="capture: the project the session ran in")
+    s.add_argument("--last", action="store_true", help="learn-session: the project's most recent session")
     s.set_defaults(fn=cmd_lessons)
 
     s = sub.add_parser("acp", help="live agent sessions (ACP) for board workers")

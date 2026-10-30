@@ -10,3 +10,6 @@ build/
 /knowledge/
 /inbox/
 /projects.yaml
+
+# agent worktrees (local)
+.claude/worktrees/

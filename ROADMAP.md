@@ -88,7 +88,8 @@ Lessons as small, scored facts that the team approves, learned first from the bo
   - denied permissions and approvals with `--always`;
   - `task_block` reasons.
 
-  A cheap background pass turns repeated patterns into lesson candidates in the **inbox**, and the user approves them as today. Session hooks (Claude `Stop`/`PreCompact`, Kiro `agentStop`) are a later source; their payloads are scrubbed of secrets and size-capped.
+  A cheap background pass turns repeated patterns into lesson candidates in the **inbox**, and the user approves them as today.
+- [x] **Phase B: the user's own sessions** (done 2026-10-30, spec `docs/superpowers/specs/2026-10-30-session-learning-design.md`). Claude Code's `SessionEnd` hook finds corrections with fixed rules; a background learner writes lessons that start below context (0.4). Kiro: manual trigger until `spikes/kiro-session-capture` reports how Kiro exposes a conversation.
 - [x] **Promotion across projects.** The same lesson approved in 2 or more projects with high confidence is proposed as an org memory. This is the shared-context goal.
 - [x] **Ranked context.** `aos context` already has a size cap. Add ranking: confidence plus relevance to the project and its stack, a maximum number of lessons, and a minimum confidence. The most useful lessons survive the cap, not the oldest.
 - [ ] **Memory trust.**
