@@ -289,7 +289,7 @@ How lessons are used:
 | Import from Notion/Confluence into `knowledge/` | 🔜 sub-project 4 |
 | Multi-project features with parallel Claude Code / Kiro workers (board) | ✅ works now |
 
-In interactive sessions (outside the board), learning still happens only while the session runs: the agent saves things when the protocol or you prompt it. Saying *"save what you learned"* at the end of a session is a good habit.
+In interactive sessions (outside the board), the agent also saves memory and skills while the session runs, when the protocol or you prompt it. Saying *"save what you learned"* at the end of a session is still a good habit. Corrections you make are picked up automatically when the session ends.
 
 ---
 
