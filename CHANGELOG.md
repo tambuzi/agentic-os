@@ -4,6 +4,11 @@ All notable changes to agenticOS. Format: [Keep a Changelog](https://keepachange
 
 Releases before 0.7.0 were numbered after the fact, one per merged pull request, and are not tagged yet.
 
+## [Unreleased]
+
+### Docs
+- README: a beginner section, 'New here? agenticOS for dummies'.
+
 ## [0.9.1] — unreleased (`fix/deferred-minors`)
 
 ### Fixed
