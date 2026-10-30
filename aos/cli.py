@@ -461,7 +461,11 @@ def cmd_board(a) -> int:
         spent = _cost_text(board.feature_cost(f["slug"]), board.feature_cost(f["slug"], "credit"))
         print(f"{f['slug']} [{f['status']}] contract v{f['contract_version']}: {f['title']}"
               + (f"  ({spent})" if spent else ""))
-        for t in board.tasks(feature=f["slug"]):
+        tasks = board.tasks(feature=f["slug"])
+        tools = {t["id"]: f"{t['worker']}/{resolve_model(aos, t)[0] or 'auto'}/{t.get('transport') or '-'}"
+                 for t in tasks}
+        width = max([18, *map(len, tools.values())])
+        for t in tasks:
             extra = ""
             if t["id"] in stuck:
                 extra = "  waiting on failed/cancelled " + ", ".join(f"#{d}" for d in stuck[t["id"]])
@@ -469,8 +473,8 @@ def cmd_board(a) -> int:
                 blk = [e for e in board.events(f["slug"]) if e["task"] == t["id"] and e["kind"] == "blocker"]
                 extra = f"  {blk[-1]['body'][:80]}" if blk else ""
             cost = _cost_text(board.task_cost(t["id"]), board.task_cost(t["id"], "credit"))
-            tool = f"{t['worker']}/{resolve_model(aos, t)[0] or 'auto'}/{t.get('transport') or '-'}"
-            print(f"  #{t['id']:<4} {t['project']:<14} {t['status']:<10} {tool:<18} {t['attempts']}/{t['max_attempts']}"
+            print(f"  #{t['id']:<4} {t['project']:<14} {t['status']:<10} {tools[t['id']]:<{width}} "
+                  f"{t['attempts']}/{t['max_attempts']}"
                   f"{f'  {cost}' if cost else ''}  {t['title']}{extra}")
         for p in board.permissions(feature=f["slug"], status="pending"):
             print(f"  permission #{p['id']} for #{p['task']}: {p['summary']}  "
