@@ -36,6 +36,10 @@ _DANGEROUS = re.compile(r"(?i)git\s+push|--no-verify|core\.hookspath|\bsudo\b|rm
                         r"|(ignore|disregard)\s+(the\s+|all\s+|your\s+)?(instructions|rules|system prompt)")
 
 
+def contains_secret(text: str) -> bool:
+    return bool(_SECRET.search(text or ""))
+
+
 class LessonError(AosError):
     """A lesson operation was refused; the message is shown to whoever asked (the learner)."""
 

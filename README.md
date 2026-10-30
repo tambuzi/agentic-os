@@ -371,6 +371,17 @@ Then enable **Workflows** in Kiro's Workspace Configuration and run `aos-checkou
 
 The board still does the execution, so Claude Code users keep `aos board run`. Limit: about 15 tasks per workflow (Kiro allows 50 nodes).
 
+**Workers talk to each other.** Workers on the same feature can send each other information while they work:
+- **heads-up broadcasts** (`task_broadcast`), e.g. "orders API now returns total_cents";
+- **direct questions** (`task_message(..., question=true)`), answered later by the other worker with `task_reply`.
+
+How it works:
+- **Live delivery:** messages arrive live, the same way your steers do. A worker that hasn't started yet finds them in its context.
+- **Finished tasks:** a question to a task that already finished gets an automatic reply with its result. If that isn't enough, the worker escalates the question, and the planner answers it (`message_answer`), asking you if needed.
+- **Limits and rules:** at most 5 messages per attempt (`board.messages.max_per_attempt`; replies don't count), and a reply only answers a question, once. No worker ever waits for an answer.
+- **Information, not instructions:** messages never override a task's spec or the contract; contract changes still need your approval.
+- **Where to see them:** `aos board` lists open questions, and `aos task show <id> --messages` shows a task's thread.
+
 **Before a task counts as done:**
 1. The worker's `task_complete` is only a claim.
 2. aos checks the task actually added commits and that the project's `verify_command` passes. Set it in `~/.agenticos/data/projects.yaml`, e.g. `worker: {verify_command: "npm ci && npm test"}`. It runs as a shell command line, so every part of a chain runs. Workers are told the command and run it themselves before `task_complete`.

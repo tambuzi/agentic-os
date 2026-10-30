@@ -54,6 +54,7 @@ You run the whole flow in this conversation. The user only steps in for decision
       - `proposals`: show each `change` and `reason`; ask approve or reject.
       - `stuck`: a task waits on a failed or cancelled task (`waiting_on`); ask retry or cancel that task.
       - `permissions`: a running worker asks to do something outside its allow-list (each has an `id` and a `summary`). Ask the user yes / no, and whether to always allow it for that project. The worker waits, and the request is refused after 30 minutes without an answer.
+      - `questions`: a worker escalated a question it couldn't get answered by the other worker (each has an `id`, `to` and `text`). Answer it with `message_answer(id, text)` yourself when the brief, the contract or `code_query` settles it; otherwise ask the user and relay their answer. The worker keeps working meanwhile.
 
       Ask everything pending in one message, then **stop and wait for the user's reply**.
     - **stalled**: call `board_start(feature)`, then `board_wait` again.
@@ -66,9 +67,12 @@ You run the whole flow in this conversation. The user only steps in for decision
     - `task_retry(task, note=<their guidance>)` or `task_cancel(task)`;
     - `proposal_decide(proposal, approve, reason)`. On approve, the contract gets a new version that every worker must re-read.
     - `permission_decide(permission, approve, always)`. No `board_start` is needed for these, because the worker is still running.
+    - `message_answer(id, text)` for escalated questions. No `board_start` is needed either.
+
+Workers also talk to each other directly: heads-up broadcasts, and questions answered by the other worker. You only see the questions they escalate; `board_status(feature)` shows `messages` (per task) and any `open_questions`.
 
 ## 5. Finish
-12. Report each task's result (first line), anything cancelled, and where the work is: `~/.agenticos/worktrees/<feature>/<project>` on branch `feature/<feature>`. Nothing is pushed; the user reviews and merges.
+12. Report each task's result (first line), anything cancelled, any open questions between workers, and where the work is: `~/.agenticos/worktrees/<feature>/<project>` on branch `feature/<feature>`. Nothing is pushed; the user reviews and merges.
 13. Offer a review pass. If wanted, add one task per project, depending on that project's tasks: "Review the feature branch against contract v<N>; fix what deviates; report findings". Then go back to step 10.
 14. **Lessons learned.** agenticOS learns from the corrections in this feature (failed reviews or checks, retries, the user's steers, denied permissions, blocks). It does this by itself, in short learner runs after tasks finish.
     - List them under a "Lessons learned this feature" heading, from `board_status(feature).lessons`: each one's trigger, action, confidence and whether it is new.

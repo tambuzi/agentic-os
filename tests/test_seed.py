@@ -68,3 +68,8 @@ def test_master_skill_relays_permission_requests():
 def test_master_skill_reports_lessons():
     text = (ROOT / "skills/aos-feature/SKILL.md").read_text()
     assert "Lessons learned" in text and "lesson_decide" in text and "aos inbox apply" in text
+
+
+def test_master_skill_handles_worker_questions():
+    text = (ROOT / "skills/aos-feature/SKILL.md").read_text()
+    assert "message_answer" in text and "questions" in text and "open_questions" in text

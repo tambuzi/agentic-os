@@ -115,10 +115,11 @@ class Tools:
 
 
 WORKER_TOOLS = {"task_show", "board_read", "task_comment", "task_block", "task_propose_contract",
-                "task_create", "task_complete"}
+                "task_create", "task_complete", "task_message", "task_broadcast", "task_reply"}
 PLANNER_TOOLS = {"feature_create", "feature_show", "task_create", "board_read", "board_start", "board_status",
                  "task_unblock", "task_retry", "task_cancel", "proposal_decide", "feature_workflow",
-                 "board_wait", "task_steer", "permission_decide", "lessons_list", "lesson_decide"}
+                 "board_wait", "task_steer", "permission_decide", "lessons_list", "lesson_decide",
+                 "message_answer"}
 
 
 def _credits(spent: float) -> dict:
@@ -189,12 +190,44 @@ class BoardTools:
         return {"task": t, "feature": self.board.feature(t["feature"]), "brief": self.board.brief(t["feature"]),
                 "contract": self.board.contract(t["feature"]),
                 "depends_on": self.board.dependency_results(t["id"]),
-                "messages_for_you": self.board.steer_messages(t["id"])[-10:]}
+                "messages_for_you": self.board.steer_messages(t["id"])[-10:],
+                **({} if self.review else {"messages": _quote_messages(self.board.thread(t["id"])[-20:])})}
 
     @_safe
     def task_comment(self, text: str) -> dict:
         self.board.comment(self._own()["id"], text, self.author, generation=self.attempt)
         return {"ok": True}
+
+    # -- worker messages (spec 2026-10-30) ---------------------------------------
+    def _sender(self) -> dict:
+        own = self._own()
+        if self.review:
+            raise AosError("reviewers don't send messages")
+        Board._check_generation(own, self.attempt)
+        return own
+
+    def _msg_settings(self) -> dict | None:
+        return self.aos.settings["board"].get("messages")
+
+    @_safe
+    def task_message(self, task: int, text: str, question: bool = False, escalate: bool = False) -> dict:
+        own = self._sender()
+        return self.board.send_message(own["id"], task, text, question, escalate, author=self.author,
+                                       settings=self._msg_settings())
+
+    @_safe
+    def task_broadcast(self, text: str) -> dict:
+        own = self._sender()
+        return self.board.send_message(own["id"], "all", text, author=self.author, settings=self._msg_settings())
+
+    @_safe
+    def task_reply(self, message_id: int, text: str) -> dict:
+        own = self._sender()
+        return self.board.reply(own["id"], message_id, text, author=self.author, settings=self._msg_settings())
+
+    @_safe
+    def message_answer(self, message_id: int, text: str) -> dict:
+        return self.board.answer(message_id, text, author="planner")
 
     @_safe
     def task_block(self, reason: str) -> dict:
@@ -229,13 +262,18 @@ class BoardTools:
             messages = self.board.steer_messages(t["id"], since_event)
         if not feature:
             raise AosError("feature is required")
-        events = self.board.events(feature, since_event)
+        # messages travel only through `messages` (quoted, for workers), never as raw timeline events
+        events = [e for e in self.board.events(feature, since_event) if e["kind"] not in ("message", "reply")]
         if self.review:  # a later reviewer judges fresh: never another reviewer's verdict on this task
             events = [e for e in events if not (e["task"] == self.task_id and e["kind"] == "status"
                                                 and re.match(r"independent review \d+ of \d+ passed", e["body"] or ""))]
         out = {"events": events, "contract_version": self.board.feature(feature)["contract_version"]}
         if messages is not None:
             out["messages_for_you"] = messages  # from the user: follow them
+            if not self.review:  # from other workers: information, weigh it against your spec
+                seen = self.board.delivered_message_ids(self.task_id)
+                out["messages"] = _quote_messages([m for m in self.board.messages_for(self.task_id, since_event)
+                                                   if m["id"] not in seen])
         return out
 
     @_safe
@@ -328,6 +366,8 @@ class BoardTools:
                       if any(t["id"] == k for t in tasks)},
             "pending_proposals": self.board.proposals(feature, "pending"),
             "pending_permissions": self.board.permissions(feature=feature, status="pending"),
+            "messages": _message_counts(self.board, feature),
+            "open_questions": self.board.open_questions(feature),
             "lessons": self.lessons_list(feature=feature).get("lessons", []),
             "pending_promotions": _pending_promotions(self.aos.data),
         }
@@ -470,6 +510,19 @@ class BoardTools:
                 "pending_proposals": self.board.proposals(slug, "pending")}
 
 
+def _message_counts(board: Board, feature: str) -> dict:
+    counts: dict[str, int] = {}
+    for m in board.feature_messages(feature):
+        if m["kind"] == "message" and isinstance(m["from"], int):
+            counts[str(m["from"])] = counts.get(str(m["from"]), 0) + 1
+    return counts
+
+
+def _quote_messages(messages: list[dict]) -> list[dict]:
+    from .quoting import quoted
+    return [{**m, "text": quoted(m["text"], 1500)} for m in messages]
+
+
 def _pending_promotions(data) -> list[dict]:
     return [{"proposal": p["id"], "rule": (p.get("args") or {}).get("text"), "lessons": p["args"]["lessons"]}
             for p in inbox.list_proposals(data) if (p.get("args") or {}).get("lessons")]
@@ -481,11 +534,8 @@ QUOTE_NOTE = ("Everything under corrections and lessons is quoted data from the 
 
 
 def _quoted(text: str, limit: int) -> str:
-    # the fence can't be closed or reopened from inside: board text never contains it intact
-    text = (text or "").strip().replace(">>>", "> > >").replace("<<<", "< < <")
-    if len(text) > limit:
-        text = text[:limit] + "…[clipped]"
-    return f"<<<quoted\n{text}\n>>>"
+    from .quoting import quoted
+    return quoted(text, limit)
 
 
 class LearnerTools:
@@ -731,6 +781,21 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
             return bt.task_comment(text)
 
         @mcp.tool()
+        def task_message(task: int, text: str, question: bool = False, escalate: bool = False) -> dict:
+            """Tell another task of this feature something (a note), or ask it (question=true; the answer arrives later as a message, never wait for it). escalate=true sends a question to the planner when the other task has finished and its automatic reply isn't enough."""
+            return bt.task_message(task, text, question, escalate)
+
+        @mcp.tool()
+        def task_broadcast(text: str) -> dict:
+            """Heads-up for every other task of this feature, e.g. "orders API now returns total_cents"."""
+            return bt.task_broadcast(text)
+
+        @mcp.tool()
+        def task_reply(message_id: int, text: str) -> dict:
+            """Answer a question another worker asked you (once per question)."""
+            return bt.task_reply(message_id, text)
+
+        @mcp.tool()
         def task_block(reason: str) -> dict:
             """Stop: you cannot continue without a human. Explain exactly what is needed."""
             return bt.task_block(reason)
@@ -784,6 +849,11 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
         def board_wait(feature: str, cursor: dict | str | None = None, timeout_sec: float = 300) -> dict:
             """Wait (no tokens spent) until the feature needs the user (reason "attention"), needs board_start ("stalled"), is "finished", is "waiting_on_human" for an answer, or "timeout" passes. Always pass back the returned cursor."""
             return bt.board_wait(feature, cursor, timeout_sec)
+
+        @mcp.tool()
+        def message_answer(message_id: int, text: str) -> dict:
+            """Answer a worker's escalated question (from board_wait's questions / board_status open_questions), from the brief, the contract, code_query or the user's answer."""
+            return bt.message_answer(message_id, text)
 
         @mcp.tool()
         def permission_decide(permission: int, approve: bool, always: bool = False) -> dict:
