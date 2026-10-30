@@ -96,15 +96,15 @@ Lessons as small, scored facts that the team approves, learned first from the bo
   - Recalled memory is evidence to check, not an instruction.
   - A `handoff` kind passes a feature between Claude Code and Kiro: objective, state, open questions, next action.
 
-## 3b. Model per task (next)
+## 3b. Model per task ✅ (done 2026-10-30, with auto mode by task size)
 
 Choose the model per task, not only per tool. Bounded change: a short design in chat, then test-first.
 
-- [ ] Precedence, like the tool choice: task > feature > project (`worker: {model: …}` in `projects.yaml`) > the tool's default in `aos.yaml`.
-- [ ] Flags: `aos task add … --model opus`, `aos feature new … --model haiku`, `task_create(..., model=)` for the planner, and `aos board run --model` for one run (like `--worker`).
-- [ ] `aos board` and `board_status` show tool/model/transport per task.
-- [ ] The model must fit the task's tool (Claude names for Claude, Kiro names for Kiro); a mismatch is refused when the task is created or retried.
-- [ ] Later, with 4b: the planner suggests a model from the task's size (trivial → cheap, large/security → strong).
+- [x] Precedence, like the tool choice: task > feature > project (`worker: {model: …}` in `projects.yaml`) > the tool's default in `aos.yaml`.
+- [x] Flags: `aos task add … --model opus`, `aos feature new … --model haiku`, `task_create(..., model=)` for the planner, and `aos board run --model` for one run (like `--worker`).
+- [x] `aos board` and `board_status` show tool/model/transport per task.
+- [x] The model must fit the task's tool (Claude names for Claude, Kiro names for Kiro); a mismatch is refused when the task is created or retried.
+- [x] Auto mode: the planner sizes each task and the size picks the model tier (trivial → cheap, large → strong).
 
 ## 3c. Worker-to-worker messages (spec first)
 

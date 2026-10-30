@@ -57,6 +57,9 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 
+SIZES = ("trivial", "small", "standard", "large")  # a task's size picks its model in auto mode
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -93,8 +96,11 @@ class Board:
         c.executescript(SCHEMA)
         if "unit" not in {r["name"] for r in c.execute("PRAGMA table_info(costs)")}:
             c.execute("ALTER TABLE costs ADD COLUMN unit TEXT NOT NULL DEFAULT 'USD'")  # credits (Kiro)
-        if "worker" not in {r["name"] for r in c.execute("PRAGMA table_info(features)")}:
+        fcols = {r["name"] for r in c.execute("PRAGMA table_info(features)")}
+        if "worker" not in fcols:
             c.execute("ALTER TABLE features ADD COLUMN worker TEXT")  # feature default tool
+        if "model" not in fcols:
+            c.execute("ALTER TABLE features ADD COLUMN model TEXT")   # feature default model
         cols = {r["name"] for r in c.execute("PRAGMA table_info(tasks)")}
         if "proc_start" not in cols:  # boards created before proc_start existed
             c.execute("ALTER TABLE tasks ADD COLUMN proc_start TEXT")
@@ -106,7 +112,9 @@ class Board:
                            ("review_stage", "TEXT"),                          # None | verified | reviewing
                            ("review_attempts", "INTEGER NOT NULL DEFAULT 0"),  # reviewer launches
                            ("revert_to", "TEXT"),                             # rejected work to undo
-                           ("transport", "TEXT")):                            # acp | cli (last attempt)
+                           ("transport", "TEXT"),                             # acp | cli (last attempt)
+                           ("model", "TEXT"),                                 # chosen by hand (None = auto)
+                           ("size", "TEXT")):                                 # trivial|small|standard|large
             if name not in cols:  # boards created before the column existed
                 c.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
         if c.execute("SELECT 1 FROM meta WHERE key='learning_since'").fetchone() is None:
@@ -160,15 +168,15 @@ class Board:
         return self.data / "features" / slug
 
     def create_feature(self, slug: str, title: str, brief: str = "", contract: str = "",
-                       author: str = "human", worker: str | None = None) -> dict:
+                       author: str = "human", worker: str | None = None, model: str | None = None) -> dict:
         check_slug(slug, "feature")
         if not (title or "").strip():
             raise AosError("feature needs a title")
         with self._tx() as c:
             if c.execute("SELECT 1 FROM features WHERE slug=?", (slug,)).fetchone():
                 raise AosError(f"feature {slug!r} already exists")
-            c.execute("INSERT INTO features(slug, title, status, contract_version, created, worker) "
-                      "VALUES (?,?,?,?,?,?)", (slug, title.strip(), "open", 1, now(), worker or None))
+            c.execute("INSERT INTO features(slug, title, status, contract_version, created, worker, model) "
+                      "VALUES (?,?,?,?,?,?,?)", (slug, title.strip(), "open", 1, now(), worker or None, model or None))
             self._event(c, slug, None, "status", author, f"feature created: {title.strip()}")
             d = self.feature_dir(slug)
             write_atomic(d / "brief.md", brief)
@@ -209,10 +217,13 @@ class Board:
 
     # -- tasks ---------------------------------------------------------------
     def add_task(self, feature: str, project: str, title: str, spec: str = "", depends_on=(),
-                 worker: str = "claude", max_attempts: int = 2, created_by: str = "human") -> int:
+                 worker: str = "claude", max_attempts: int = 2, created_by: str = "human",
+                 model: str | None = None, size: str | None = None) -> int:
         check_slug(project)
         if not (title or "").strip():
             raise AosError("task needs a title")
+        if size and size not in SIZES:
+            raise AosError(f"size must be one of {', '.join(SIZES)}, not {size!r}")
         deps = sorted({int(d) for d in (depends_on or [])})
         with self._tx() as c:
             f = c.execute("SELECT status FROM features WHERE slug=?", (feature,)).fetchone()
@@ -230,9 +241,9 @@ class Board:
                     raise AosError(f"dependency #{d} is not a task of feature {feature!r}")
             cur = c.execute(
                 "INSERT INTO tasks(feature, project, title, spec, status, worker, max_attempts, "
-                "updated, created_by) VALUES (?,?,?,?,?,?,?,?,?)",
+                "updated, created_by, model, size) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (feature, project, title.strip(), spec or "", "todo", worker, int(max_attempts),
-                 now(), created_by))
+                 now(), created_by, model or None, size or None))
             tid = cur.lastrowid
             c.executemany("INSERT INTO deps(task, depends_on) VALUES (?,?)", [(tid, d) for d in deps])
             self._event(c, feature, tid, "status", created_by,
@@ -466,6 +477,15 @@ class Board:
                 for e in self.events(t["feature"], since)
                 if e["task"] == t["id"] and e["kind"] in ("steer", "steer_now")]
 
+    def set_model(self, tid: int, model: str | None, author: str = "dispatcher", why: str = "") -> None:
+        with self._tx() as c:
+            t = self._task_row(c, tid)
+            if t["model"] == model:
+                return
+            c.execute("UPDATE tasks SET model=?, updated=? WHERE id=?", (model, now(), int(tid)))
+            self._event(c, t["feature"], int(tid), "status", author,
+                        f"model {t['model'] or 'auto'} -> {model or 'auto'}{why}")
+
     def set_worker(self, tid: int, worker: str, author: str = "dispatcher", why: str = "") -> None:
         with self._tx() as c:
             t = self._task_row(c, tid)
@@ -662,7 +682,7 @@ class Board:
                              last_failure=reason, resume_hint=1 if ran else t["resume_hint"])
 
     def retry(self, tid: int, note: str | None = None, worker: str | None = None,
-              resume: bool = False, author: str = "human") -> None:
+              resume: bool = False, author: str = "human", model: str | None = None) -> None:
         with self._tx() as c:
             t = self._task_row(c, tid)
             if resume and worker and worker != t["worker"]:
@@ -670,7 +690,7 @@ class Board:
             self._transition(c, tid, ("failed", "blocked", "cancelled", "done", "ready"), "todo", author,
                              "retry requested" + (" (resume)" if resume else ""),
                              attempts=0, last_failure=None, note=note, resume=1 if resume else 0,
-                             worker=worker or t["worker"], pid=None)
+                             worker=worker or t["worker"], pid=None, model=model or t["model"])
         self.promote()
 
     def cancel(self, tid: int, author: str = "human") -> None:

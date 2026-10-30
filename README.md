@@ -129,7 +129,10 @@ learning:
   max_in_context: 8                   # lessons per project in a session or worker context
   min_confidence: 0.5
 workers:
-  claude: {model: sonnet, learning_model: haiku}   # learning_model: the cheap model for learner runs
+  claude:
+    model: sonnet                     # the default when nothing else decides
+    learning_model: haiku             # the cheap model for learner runs
+    tiers: {trivial: haiku, small: sonnet, standard: sonnet, large: opus}   # auto: a task's size picks one
 ```
 
 Release notes: [CHANGELOG.md](CHANGELOG.md).
@@ -248,6 +251,14 @@ aos task retry 2 --resume --note "rename the button"   # feedback on a finished 
 5. `board.default_worker` in `aos.yaml`.
 
 `aos board run --worker kiro` switches every task it starts for that run.
+
+**Which model.** Set it by hand, or let the planner pick it per task (an "auto" mode like Kiro's):
+- **By hand**, most specific first: `aos task add … --model opus` > `aos feature new … --model haiku` > `worker: {model: …}` for a project in `projects.yaml`.
+- **Auto:** when nobody chose one, the task's **size** picks the tool's tier. The `aos-feature` planner sizes every task (`trivial | small | standard | large`), and you can pass `--size` by hand. Claude's default tiers are trivial → `haiku`, small and standard → `sonnet`, large → `opus` (`workers.claude.tiers` in `aos.yaml`). Kiro has no tiers by default, so Kiro's own auto mode decides.
+- Otherwise the tool's default (`workers.<tool>.model`).
+- `aos task retry <id> --model opus` retries a task on a stronger model, and `aos board run --model …` overrides every task for one run.
+- A model that doesn't fit the task's tool is refused. Claude takes `opus`/`sonnet`/`haiku`/`fable` or `claude-…` ids. Kiro takes its own names, or the exact list in `workers.kiro.models` if you set one.
+- `aos board` shows `tool/model/transport` per task, e.g. `claude/opus/acp`. `aos task show` also says where the model came from.
 
 **Live sessions (ACP).** Workers and reviewers run as live sessions over the Agent Client Protocol (`workers.<tool>.transport: acp`, the default). If the Claude adapter or Node is missing, that attempt falls back to the CLI and says so on the timeline. A live session gives:
 - **permission requests:** a tool call outside the allow-list doesn't fail the attempt. It waits for you: `aos board` lists it, `aos task approve <id> [--always]` / `aos task deny <id>` answer it (`--always` adds it to the project's `allowed_tools`). Unanswered after `board.approval_timeout_min` (30) → rejected. Dangerous ones (`git push`, `sudo`, edits outside the worktree) are rejected outright. A plain chain (`npm test; echo "exit=$?"`, `a && b`) is allowed when every command in it is; redirects, `$(…)` and `$VAR` still ask. Once you approve a request, the exact same one isn't asked again during that attempt. Each run's log (`aos task show <id> --log`) has the agent's stderr and the ACP messages (`>` sent, `<` received);

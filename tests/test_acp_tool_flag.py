@@ -101,7 +101,7 @@ def test_aos_board_shows_tool(aos, capsys):
     t = board.add_task("checkout", "api", "a", worker="kiro")
     board.set_transport(t, "acp")
     code, out, _ = run(["board"], capsys)
-    assert "kiro/acp" in out
+    assert "kiro/auto/acp" in out
 
 
 @pytest.mark.parametrize("verify,rules", [

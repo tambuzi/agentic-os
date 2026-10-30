@@ -79,6 +79,61 @@ def resolve_profile(aos: AOS, project: str, requested: str | None = None,
     return resolve_tool(aos, project, requested, feature_worker)[0]
 
 
+CLAUDE_ALIASES = ("opus", "sonnet", "haiku", "fable")
+
+
+def check_model(settings: dict, tool: str, model: str | None) -> None:
+    """Refuse a model that doesn't fit the tool: Claude takes its short names or claude-… ids;
+    Kiro takes its own names (never Claude's bare short names). `workers.<tool>.models` in
+    aos.yaml, when set, is the exact list."""
+    if model is None:
+        return
+    m = str(model).strip()
+    listed = settings.get("models")
+    if listed:
+        if m not in listed:
+            raise AosError(f"model {m!r} is not one of {tool}'s models: {', '.join(map(str, listed))}",
+                           f"see workers.{tool}.models in aos.yaml")
+        return
+    kind = settings.get("adapter", tool)
+    if kind == "claude" and not (m in CLAUDE_ALIASES or m.startswith("claude-")):
+        raise AosError(f"model {m!r} doesn't fit claude", "use opus, sonnet, haiku, fable or a claude-… model id")
+    if kind == "kiro" and m in CLAUDE_ALIASES:
+        raise AosError(f"model {m!r} is a Claude short name; kiro uses its own model names",
+                       "e.g. claude-sonnet-4.5, or leave it unset for Kiro's auto")
+
+
+def _fits(settings: dict, tool: str, model: str | None) -> bool:
+    try:
+        check_model(settings, tool, model)
+        return True
+    except AosError:
+        return False
+
+
+def resolve_model(aos: AOS, task: dict) -> tuple[str | None, str]:
+    """(model, where it came from) for a task. Chosen by hand: task > feature > project; else
+    the task's size picks the tool's tier (auto); else the tool's default. A choice that doesn't
+    fit the task's tool (e.g. a project's Claude model on a Kiro task) is skipped."""
+    tool = task["worker"]
+    settings = profile_settings(aos, tool, task["project"])
+    try:
+        feature_model = Board(aos.data).feature(task["feature"]).get("model")
+    except AosError:
+        feature_model = None
+    for source, model in (("task", task.get("model")), ("feature", feature_model),
+                          (f"project {task['project']}", _project_worker(aos, task["project"]).get("model"))):
+        if model and _fits(settings, tool, model):
+            return model, source
+    size = task.get("size")
+    tier = (settings.get("tiers") or {}).get(size) if size else None
+    if tier and _fits(settings, tool, tier):
+        return tier, f"size {size}"
+    if settings.get("model"):
+        return settings["model"], "tool default"
+    return None, "Kiro's auto" if settings.get("adapter", tool) == "kiro" else "tool default"
+
+
 def profile_settings(aos: AOS, profile: str, project: str) -> dict:
     workers = aos.settings["workers"]
     if profile == "common" or profile not in workers:
@@ -173,7 +228,7 @@ def build_worker_context(aos: AOS, board: Board, task: dict) -> str:
 
 def prepare_run(aos: AOS, board: Board, task: dict, worktree: Path, project_path: Path,
                 aos_bin: str) -> tuple[RunSpec, dict]:
-    settings = profile_settings(aos, task["worker"], task["project"])
+    settings = {**profile_settings(aos, task["worker"], task["project"]), "model": resolve_model(aos, task)[0]}
     run_dir = board.data / "runs" / f"{task['id']}-{task['attempts']}"
     context_file = run_dir / "context.md"
     write_atomic(context_file, build_worker_context(aos, board, task))
@@ -314,7 +369,7 @@ def build_review_context(aos: AOS, board: Board, task: dict, worktree: Path) -> 
 def prepare_review(aos: AOS, board: Board, task: dict, worktree: Path, project_path: Path,
                    aos_bin: str) -> tuple[RunSpec, dict]:
     """Inputs for the reviewer: same tool as the worker, fresh session, read-only tools."""
-    settings = profile_settings(aos, task["worker"], task["project"])
+    settings = {**profile_settings(aos, task["worker"], task["project"]), "model": resolve_model(aos, task)[0]}
     allowed = [a for a in settings["allowed_tools"] if not any(a == d or a.startswith(d) for d in _REVIEW_DENY)]
     for needed in ("read", "shell:git diff", "shell:git log", "shell:git show"):
         if needed not in allowed:

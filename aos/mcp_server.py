@@ -23,7 +23,7 @@ from .errors import AosError
 from .knowledge import KnowledgeIndex
 from . import inbox
 from .board import Board
-from .workers.common import profile_settings, resolve_profile
+from .workers.common import profile_settings, resolve_model, resolve_profile
 
 
 def _safe(fn):
@@ -158,14 +158,19 @@ class BoardTools:
             raise AosError("this tool is only available to board workers")
         return self.board.task(self.task_id)
 
-    def _new_task(self, feature: str, project: str, title: str, spec: str, depends_on) -> dict:
+    def _new_task(self, feature: str, project: str, title: str, spec: str, depends_on,
+                  model: str | None = None, size: str | None = None) -> dict:
+        from .workers.common import check_model, resolve_model
         if project not in self.aos.projects():
             raise AosError(f"unknown project {project!r}", "call project_list; link it with aos link")
         profile = resolve_profile(self.aos, project, feature_worker=self.board.feature(feature).get("worker"))
-        attempts = profile_settings(self.aos, profile, project)["max_attempts"]
+        settings = profile_settings(self.aos, profile, project)
+        check_model(settings, profile, model)
         tid = self.board.add_task(feature, project, title, spec, depends_on or [], worker=profile,
-                                  max_attempts=attempts, created_by=self.author)
-        return {"task": tid, "worker": profile}
+                                  max_attempts=settings["max_attempts"], created_by=self.author,
+                                  model=model, size=size)
+        chosen, source = resolve_model(self.aos, self.board.task(tid))
+        return {"task": tid, "worker": profile, "model": chosen, "model_source": source}
 
     # -- worker mode ---------------------------------------------------------
     @_safe
@@ -223,22 +228,27 @@ class BoardTools:
 
     @_safe
     def task_create(self, project: str, title: str, spec: str = "", depends_on: list[int] | None = None,
-                    feature: str | None = None) -> dict:
+                    feature: str | None = None, size: str | None = None, model: str | None = None) -> dict:
         if self.task_id:
             own = self._own()
             Board._check_generation(own, self.attempt)
             feature = own["feature"]
         if not feature:
             raise AosError("feature is required")
-        return self._new_task(feature, project, title, spec, depends_on)
+        return self._new_task(feature, project, title, spec, depends_on, model=model, size=size)
 
     # -- planner mode --------------------------------------------------------
     @_safe
     def feature_create(self, slug: str, title: str, brief: str = "", contract: str = "",
-                       worker: str | None = None) -> dict:
+                       worker: str | None = None, model: str | None = None) -> dict:
+        from .workers.common import check_model, resolve_tool
         if worker:
             profile_settings(self.aos, worker, "")  # validates the tool name
-        return self.board.create_feature(slug, title, brief, contract, author=self.author, worker=worker)
+        if model:
+            tool = worker or resolve_tool(self.aos, "")[0]
+            check_model(profile_settings(self.aos, tool, ""), tool, model)
+        return self.board.create_feature(slug, title, brief, contract, author=self.author, worker=worker,
+                                         model=model)
 
     @_safe
     def board_start(self, feature: str, parallel: int | None = None, worker: str | None = None) -> dict:
@@ -293,6 +303,7 @@ class BoardTools:
             "cost_usd": round(self.board.feature_cost(feature), 4),
             "tasks": [{"id": t["id"], "project": t["project"], "title": t["title"], "status": t["status"],
                        "worker": t["worker"], "transport": t.get("transport"), "attempts": t["attempts"],
+                       "size": t.get("size"), **dict(zip(("model", "model_source"), resolve_model(self.aos, t))),
                        "cost_usd": round(self.board.task_cost(t["id"]), 4),
                        "result": (t["result"] or "").splitlines()[0] if t["result"] else None} for t in tasks],
             "blocked": [{"task": t["id"], "project": t["project"], "reason": blockers.get(t["id"], "")}
@@ -401,8 +412,12 @@ class BoardTools:
         return self._status(task)
 
     @_safe
-    def task_retry(self, task: int, note: str = "") -> dict:
-        self.board.retry(task, note=note or None, author="human")
+    def task_retry(self, task: int, note: str = "", model: str | None = None) -> dict:
+        if model:
+            from .workers.common import check_model
+            t = self.board.task(task)
+            check_model(profile_settings(self.aos, t["worker"], t["project"]), t["worker"], model)
+        self.board.retry(task, note=note or None, author="human", model=model)
         return self._status(task)
 
     @_safe
@@ -702,9 +717,10 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
             return bt.task_propose_contract(change, reason)
 
         @mcp.tool()
-        def task_create(project: str, title: str, spec: str = "", depends_on: list[int] | None = None) -> dict:
-            """Add a follow-up task to this feature (any linked project)."""
-            return bt.task_create(project, title, spec, depends_on)
+        def task_create(project: str, title: str, spec: str = "", depends_on: list[int] | None = None,
+                        size: str | None = None) -> dict:
+            """Add a follow-up task to this feature (any linked project). size: trivial|small|standard|large."""
+            return bt.task_create(project, title, spec, depends_on, size=size)
 
         @mcp.tool()
         def task_complete(summary: str) -> dict:
@@ -713,9 +729,9 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
     else:
         @mcp.tool()
         def feature_create(slug: str, title: str, brief: str = "", contract: str = "",
-                           worker: str | None = None) -> dict:
-            """Create a multi-project feature with its brief and the shared contract (APIs, events, schemas). worker: claude|kiro only to override the user's global tool for this feature."""
-            return bt.feature_create(slug, title, brief, contract, worker)
+                           worker: str | None = None, model: str | None = None) -> dict:
+            """Create a multi-project feature with its brief and the shared contract (APIs, events, schemas). worker: claude|kiro only to override the user's global tool for this feature. model: only when the user picks one model for the whole feature."""
+            return bt.feature_create(slug, title, brief, contract, worker, model)
 
         @mcp.tool()
         def feature_show(slug: str) -> dict:
@@ -724,9 +740,10 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
 
         @mcp.tool()
         def task_create(project: str, title: str, feature: str, spec: str = "",
-                        depends_on: list[int] | None = None) -> dict:
-            """Add a task for one project to a feature; depends_on lists task ids that must finish first."""
-            return bt.task_create(project, title, spec, depends_on, feature=feature)
+                        depends_on: list[int] | None = None, size: str | None = None,
+                        model: str | None = None) -> dict:
+            """Add a task for one project to a feature; depends_on lists task ids that must finish first. size: trivial|small|standard|large — picks the model automatically (cheap for trivial, strong for large). model: only when the user chose one by hand."""
+            return bt.task_create(project, title, spec, depends_on, feature=feature, size=size, model=model)
 
         @mcp.tool()
         def board_read(feature: str, since_event: int = 0) -> dict:
@@ -759,9 +776,9 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
             return bt.task_unblock(task, note)
 
         @mcp.tool()
-        def task_retry(task: int, note: str = "") -> dict:
-            """Queue a failed/blocked/cancelled task again, with the human's guidance as a note."""
-            return bt.task_retry(task, note)
+        def task_retry(task: int, note: str = "", model: str | None = None) -> dict:
+            """Queue a failed/blocked/cancelled task again, with the human's guidance as a note. model: retry on another model (e.g. a stronger one after a failure)."""
+            return bt.task_retry(task, note, model)
 
         @mcp.tool()
         def task_cancel(task: int) -> dict:

@@ -127,12 +127,13 @@ def _warn(msg: str) -> None:
 
 class Dispatcher:
     def __init__(self, repo: str | Path, *, feature: str | None = None, parallel: int | None = None,
-                 tick: float = 2.0, worker: str | None = None):
+                 tick: float = 2.0, worker: str | None = None, model: str | None = None):
         self.aos = AOS(repo)
         board_cfg = self.aos.settings["board"]
         self.board = Board(self.aos.data, board_cfg["max_tasks_per_feature"])
         self.feature = feature
         self.worker = worker  # run override: launch every task with this tool
+        self.model = model    # run override: launch every task on this model (where it fits the tool)
         setting = parallel if parallel is not None else board_cfg["parallel"]
         # `auto`: the ceiling is max_parallel; free memory decides each start (see _may_start)
         self.parallel = int(board_cfg.get("max_parallel", 6) if str(setting) == "auto" else setting)
@@ -777,11 +778,30 @@ class Dispatcher:
         except Exception as e:  # promotion is a proposal; never let it break the dispatcher
             _warn(f"lesson promotion: {e}")
 
-    def _launch(self, t: dict) -> None:
+    def _apply_run_overrides(self, t: dict) -> dict:
+        """`aos board run --worker/--model`: switch the stored task, visibly. A hand-chosen model
+        that doesn't fit the new tool goes back to auto; a --model that doesn't fit is skipped."""
+        from .workers.common import _fits, profile_settings
         tid = t["id"]
         if self.worker and t["worker"] != self.worker:
             self.board.set_worker(tid, self.worker, why=" for this run (aos board run --worker)")
             t = {**t, "worker": self.worker}
+            settings = profile_settings(self.aos, self.worker, t["project"])
+            if t.get("model") and not _fits(settings, self.worker, t["model"]):
+                self.board.set_model(tid, None, why=f" (model reset: {t['model']} doesn't fit {self.worker})")
+                t = {**t, "model": None}
+        if self.model and t.get("model") != self.model:
+            if _fits(profile_settings(self.aos, t["worker"], t["project"]), t["worker"], self.model):
+                self.board.set_model(tid, self.model, why=" for this run (aos board run --model)")
+                t = {**t, "model": self.model}
+            else:
+                self.board.log_event(tid, "status", f"--model {self.model} doesn't fit {t['worker']}; kept "
+                                                    f"{t.get('model') or 'auto'}")
+        return t
+
+    def _launch(self, t: dict) -> None:
+        tid = t["id"]
+        t = self._apply_run_overrides(t)
         over = self._over_budget(t)
         if over:
             self.board.block(tid, over, author="dispatcher")

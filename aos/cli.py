@@ -259,10 +259,13 @@ def cmd_feature(a) -> int:
         _check_projects(aos, projects)
         brief = f"# {a.title}\n\n## Goal\n\n## Projects\n" + "".join(f"- {p}\n" for p in projects)
         contract = "# Contract\n\nAPIs, events and schemas shared between the projects.\n"
+        from .workers.common import check_model, profile_settings, resolve_tool
         if a.worker:
-            from .workers.common import profile_settings
             profile_settings(aos, a.worker, "")  # validates the tool name
-        board.create_feature(a.slug, a.title, brief, contract, worker=a.worker)
+        if a.model:
+            tool = a.worker or resolve_tool(aos, projects[0] if projects else "")[0]
+            check_model(profile_settings(aos, tool, ""), tool, a.model)
+        board.create_feature(a.slug, a.title, brief, contract, worker=a.worker, model=a.model)
         d = board.feature_dir(a.slug)
         print(f"feature {a.slug} created\n  edit: {d / 'brief.md'}\n  edit: {d / 'contract.md'}")
         print(f"then: aos task add {a.slug} <project> \"<title>\" [--after ids]   or ask the agent to deliver it (aos-feature skill)")
@@ -333,24 +336,29 @@ def cmd_worker(a) -> int:
 
 
 def cmd_task(a) -> int:
-    from .workers.common import profile_settings, resolve_profile
+    from .workers.common import check_model, profile_settings, resolve_model, resolve_profile
     aos, board = _board_ctx()
     if a.action == "add":
         _check_projects(aos, [a.project])
         profile = resolve_profile(aos, a.project, a.worker, board.feature(a.feature).get("worker"))
-        attempts = profile_settings(aos, profile, a.project)["max_attempts"]
+        settings = profile_settings(aos, profile, a.project)
+        check_model(settings, profile, a.model)
         spec = Path(a.spec_file).read_text() if a.spec_file else ""
         deps = a.after or []
-        tid = board.add_task(a.feature, a.project, a.title, spec, deps, worker=profile, max_attempts=attempts)
-        print(f"task #{tid} added ({a.project}, worker {profile})")
+        tid = board.add_task(a.feature, a.project, a.title, spec, deps, worker=profile,
+                             max_attempts=settings["max_attempts"], model=a.model, size=a.size)
+        model, source = resolve_model(aos, board.task(tid))
+        print(f"task #{tid} added ({a.project}, worker {profile}, model {model or 'auto'} from {source})")
     elif a.action == "list":
         for t in board.tasks(feature=a.feature, status=a.status):
             print(f"#{t['id']:<4} {t['feature']:<18} {t['project']:<14} {t['status']:<10} {t['worker']:<7} {t['title']}")
     elif a.action == "show":
         t = board.task(a.id)
-        print(yaml.safe_dump({k: t[k] for k in ("id", "feature", "project", "title", "status", "worker",
-                                                 "attempts", "max_attempts", "depends_on", "result", "note")},
-                             sort_keys=False, allow_unicode=True), end="")
+        model, source = resolve_model(aos, t)
+        shown = {k: t[k] for k in ("id", "feature", "project", "title", "status", "worker")}
+        shown.update({"model": f"{model or 'auto'} ({source})", "size": t.get("size")})
+        shown.update({k: t[k] for k in ("attempts", "max_attempts", "depends_on", "result", "note")})
+        print(yaml.safe_dump(shown, sort_keys=False, allow_unicode=True), end="")
         if t["spec"]:
             print(f"spec:\n{t['spec']}")
         if a.log:
@@ -361,7 +369,11 @@ def cmd_task(a) -> int:
             else:
                 print("(no log yet)")
     elif a.action == "retry":
-        board.retry(a.id, note=a.note, worker=a.worker, resume=a.resume)
+        if a.model:
+            t = board.task(a.id)
+            tool = a.worker or t["worker"]
+            check_model(profile_settings(aos, tool, t["project"]), tool, a.model)
+        board.retry(a.id, note=a.note, worker=a.worker, resume=a.resume, model=a.model)
         print(f"task #{a.id} queued again")
     elif a.action in ("approve", "deny"):
         p = board.decide_permission(a.id, a.action == "approve", getattr(a, "always", False))
@@ -424,11 +436,12 @@ def cmd_board(a) -> int:
         from .dispatcher import Dispatcher
         repo = repo_root()
         print("dispatching (Ctrl-C to stop launching; twice to stop workers)" if not a.once else "dispatching once")
-        Dispatcher(repo, feature=a.feature, parallel=a.parallel, worker=a.worker).run(
+        Dispatcher(repo, feature=a.feature, parallel=a.parallel, worker=a.worker, model=a.model).run(
             once=a.once, until_done=a.until_done)
         return 0
     from .dispatcher import dispatcher_status
-    _, board = _board_ctx()
+    from .workers.common import resolve_model
+    aos, board = _board_ctx()
     st = dispatcher_status(board.data)
     print(f"dispatcher: running (pid {st['pid']}, feature {st.get('feature') or 'all'})" if st["running"]
           else "dispatcher: not running")
@@ -447,8 +460,8 @@ def cmd_board(a) -> int:
                 blk = [e for e in board.events(f["slug"]) if e["task"] == t["id"] and e["kind"] == "blocker"]
                 extra = f"  {blk[-1]['body'][:80]}" if blk else ""
             cost = board.task_cost(t["id"])
-            tool = f"{t['worker']}/{t.get('transport') or '-'}"
-            print(f"  #{t['id']:<4} {t['project']:<14} {t['status']:<10} {tool:<11} {t['attempts']}/{t['max_attempts']}"
+            tool = f"{t['worker']}/{resolve_model(aos, t)[0] or 'auto'}/{t.get('transport') or '-'}"
+            print(f"  #{t['id']:<4} {t['project']:<14} {t['status']:<10} {tool:<18} {t['attempts']}/{t['max_attempts']}"
                   f"{f'  ${cost:.2f}' if cost else ''}  {t['title']}{extra}")
         for p in board.permissions(feature=f["slug"], status="pending"):
             print(f"  permission #{p['id']} for #{p['task']}: {p['summary']}  "
@@ -526,6 +539,7 @@ def _parser() -> argparse.ArgumentParser:
     f.add_argument("--title", required=True)
     f.add_argument("--projects", help="comma-separated linked project slugs")
     f.add_argument("--worker", help="claude|kiro for this feature only (default: your `aos worker` setting)")
+    f.add_argument("--model", help="model for every task of this feature, unless a task sets its own")
     fsub.add_parser("list")
     for name in ("show", "done", "cancel"):
         fsub.add_parser(name).add_argument("slug")
@@ -550,6 +564,9 @@ def _parser() -> argparse.ArgumentParser:
     t.add_argument("--spec-file")
     t.add_argument("--after", type=_id_list, help="comma-separated task ids this task waits for")
     t.add_argument("--worker", choices=None, help="worker profile (claude, kiro, ...)")
+    t.add_argument("--model", help="model for this task, chosen by hand (default: auto from --size, else the tool's)")
+    t.add_argument("--size", choices=["trivial", "small", "standard", "large"],
+                   help="how big the task is; picks the model tier when no model is chosen by hand")
     t = tsub.add_parser("list")
     t.add_argument("--feature")
     t.add_argument("--status")
@@ -557,6 +574,7 @@ def _parser() -> argparse.ArgumentParser:
     t.add_argument("id", type=int)
     t.add_argument("--log", action="store_true")
     t = tsub.add_parser("retry")
+    t.add_argument("--model", help="retry on this model (e.g. a stronger one)")
     t.add_argument("id", type=int)
     t.add_argument("--resume", action="store_true")
     t.add_argument("--note")
@@ -585,6 +603,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--until-done", action="store_true",
                    help="keep dispatching, exit when nothing more can run (finished, or waiting on a human)")
     s.add_argument("--worker", help="run: launch every task with this tool (claude|kiro) and record the switch")
+    s.add_argument("--model", help="run: launch every task on this model, where it fits the task's tool")
     s.set_defaults(fn=cmd_board)
     sub.add_parser("status", help="uncommitted agenticOS changes").set_defaults(fn=cmd_status)
     sub.add_parser("doctor", help="check installation").set_defaults(fn=cmd_doctor)
