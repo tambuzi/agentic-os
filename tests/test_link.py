@@ -51,6 +51,18 @@ def test_link_is_idempotent(env):
     assert rep["changed"] == [] and rep["removed"] == [] and rep["conflicts"] == []
 
 
+def test_sync_leaves_an_unchanged_manifest_alone(env, make_skill):
+    import os
+    link(env, slug="shop")
+    manifest = env / ".aos/manifest.json"
+    os.utime(manifest, (1_000_000_000, 1_000_000_000))
+    sync(env)
+    assert manifest.stat().st_mtime == 1_000_000_000
+    make_skill("new-skill")
+    sync(env)
+    assert manifest.stat().st_mtime != 1_000_000_000 and "new-skill" in manifest.read_text()
+
+
 def test_preserves_user_config(env):
     p = env
     (p / ".mcp.json").write_text(json.dumps({"mcpServers": {"db": {"command": "pg"}}}))

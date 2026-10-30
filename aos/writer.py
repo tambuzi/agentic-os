@@ -266,7 +266,9 @@ class Writer:
         if keep_manifest:
             manifest = {"files": self.files, "json_keys": self.json_keys, "hooks": self.hooks,
                         "blocks": self.blocks, "created": sorted(self.created)}
-            write_atomic(mpath, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+            text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+            if read_text(mpath) != text:
+                write_atomic(mpath, text)
         else:
             mpath.unlink(missing_ok=True)
             _prune_dirs(mpath.parent, self.project)
