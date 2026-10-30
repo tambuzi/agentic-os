@@ -21,10 +21,15 @@ def task_attention(board: Board, t: dict, stuck: dict[int, list[int]] | None = N
                  for p in board.proposals(t["feature"], "pending") if p["task"] == t["id"]]
     info = {"task": t["id"], "feature": t["feature"], "project": t["project"], "title": t["title"],
             "status": t["status"], "attempts": t["attempts"], "max_attempts": t["max_attempts"]}
+    questions = [{"id": q["id"], "to": q["to"], "text": q["text"]} for q in board.open_questions(t["feature"])
+                 if q["escalated"] and q["from"] == t["id"]]
+    qsig = "|questions:" + ",".join(str(q["id"]) for q in questions) if questions else ""
+    if questions:
+        info["questions"] = questions  # escalated by this task's worker: the planner answers
     if t["status"] in TERMINAL:
         info["result"] = t["result"]
-        return "", info
-    sig = ""
+        return qsig.lstrip("|"), info
+    sig = qsig
     if t["status"] == "blocked":
         blk = [e for e in events if e["kind"] == "blocker"]
         info["blocker"] = blk[-1]["body"] if blk else ""

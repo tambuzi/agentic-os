@@ -386,6 +386,12 @@ def cmd_task(a) -> int:
         print(yaml.safe_dump(shown, sort_keys=False, allow_unicode=True), end="")
         if t["spec"]:
             print(f"spec:\n{t['spec']}")
+        if getattr(a, "messages", False):
+            for m in board.thread(t["id"]):
+                kind = "question" if m["question"] else m["kind"]
+                escalated = " (escalated)" if m["escalated"] else ""
+                re_ = f" re #{m['re']}" if m["re"] else ""
+                print(f"  [{m['id']}] #{m['from']} -> #{m['to']} {kind}{escalated}{re_}: {m['text']}")
         if a.log:
             logs = sorted((board.data / "logs").glob(f"{t['id']}-*.log"), key=lambda p: p.stat().st_mtime)
             if logs:
@@ -500,6 +506,9 @@ def cmd_board(a) -> int:
             print(f"  #{t['id']:<4} {t['project']:<14} {t['status']:<10} {tools[t['id']]:<{width}} "
                   f"{t['attempts']}/{t['max_attempts']}"
                   f"{f'  {cost}' if cost else ''}  {t['title']}{extra}")
+        for q in board.open_questions(f["slug"]):
+            print(f"  question #{q['id']} from #{q['from']} to #{q['to']}: {q['text'][:80]}"
+                  + ("  (escalated: answer with message_answer)" if q["escalated"] else ""))
         for p in board.permissions(feature=f["slug"], status="pending"):
             print(f"  permission #{p['id']} for #{p['task']}: {p['summary']}  "
                   f"(aos task approve {p['id']} [--always] | aos task deny {p['id']})")
@@ -612,6 +621,7 @@ def _parser() -> argparse.ArgumentParser:
     t = tsub.add_parser("show")
     t.add_argument("id", type=int)
     t.add_argument("--log", action="store_true")
+    t.add_argument("--messages", action="store_true", help="the task's messages with other workers")
     t = tsub.add_parser("retry")
     t.add_argument("--model", help="retry on this model (e.g. a stronger one)")
     t.add_argument("id", type=int)
