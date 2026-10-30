@@ -367,10 +367,10 @@ def decline(data: str | Path, group: list[Lesson]) -> None:
 
 
 def promotion_candidates(data: str | Path) -> list[list[Lesson]]:
-    out, no = [], declined(data)
+    out, no = [], [set(key.split("|")) for key in declined(data)]
     for g in groups(data):
         confirmed = {l.project for l in g if l.status == "confirmed"}
-        if len(confirmed) < 2 or _group_key(g) in no:
+        if len(confirmed) < 2 or any(key <= {l.ref for l in g} for key in no):  # a declined group that grew
             continue
         if any(l.promoted_to or l.promotion for l in g):
             continue

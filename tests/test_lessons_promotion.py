@@ -72,3 +72,16 @@ def test_reject_declines_for_good(aos, capsys):
     assert api.get(a.id).promotion is None and api.get(a.id).promoted_to is None
     assert lessons.stage_promotions(aos) == []
     assert aos.memory("org").entries() == []
+
+
+def test_a_declined_group_stays_declined_when_a_project_joins(aos, capsys):
+    api, a, web, w = linked(aos)
+    api.decide(a.id, True)
+    [pid] = lessons.stage_promotions(aos)
+    assert main(["inbox", "reject", pid]) == 0
+    billing = LessonStore(aos.data, "billing")
+    b = billing.new("when adding a table", "Add a migration in billing.", "database", EV,
+                    same_as=[f"web/{w.id}"], general_rule="Ship a migration with every new table.")
+    billing.decide(b.id, True)
+    assert len(lessons.groups(aos.data)[0]) == 3
+    assert lessons.stage_promotions(aos) == []
