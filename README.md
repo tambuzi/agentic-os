@@ -301,6 +301,13 @@ The board still does the execution, so Claude Code users keep `aos board run`. L
 3. A **separate reviewer** (same tool, fresh session, read-only) checks the task's own diff against the spec and the contract.
 4. If either step rejects the work, the worktree is reset to where the attempt started, and the findings go to the next attempt.
 
+**How much review a task gets:**
+- **Trivial tasks** (`--size trivial`) are accepted once their checks pass, without a reviewer (`board.skip_review_sizes: [trivial]`; set `[]` to always review).
+- **Security-sensitive changes** get a reviewer with a security checklist: authentication and authorization, input validation, injection, secrets, path traversal and crypto. Any real security finding fails the review.
+  - A change counts as sensitive when the planner marks it (`--security`, `task_create(security=true)`), or when aos detects it with fixed rules. The rules look at file paths (auth, session, token, secret, crypto, permission, `.env`) and at added lines (secrets, SQL built from strings, shell calls, `eval`, unsafe deserialising, crypto, file paths built from input).
+  - The timeline says why.
+- **Two independent reviewers** for risky tasks are optional: `board.second_review: [large, security]`. Both must pass, and the second one starts fresh, without the first one's verdict.
+
 **Safety rails:**
 - the same failure twice stops a task;
 - an interrupted attempt makes the next one inspect the repository first;

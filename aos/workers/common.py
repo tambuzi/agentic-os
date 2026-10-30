@@ -355,7 +355,8 @@ def _git_out(args: list[str], cwd: Path) -> str:
     return r.stdout if r.returncode == 0 else f"(git {' '.join(args)} failed: {r.stderr.strip()})"
 
 
-def build_review_context(aos: AOS, board: Board, task: dict, worktree: Path) -> str:
+def build_review_context(aos: AOS, board: Board, task: dict, worktree: Path,
+                         security: list[str] | None = None) -> str:
     feature = board.feature(task["feature"])
     contract = board.contract(task["feature"])
     base = task.get("base_commit") or "HEAD~1"
@@ -374,11 +375,25 @@ def build_review_context(aos: AOS, board: Board, task: dict, worktree: Path) -> 
         f"## Commits of this task ({base}..HEAD)\n\n{_git_out(['log', '--oneline', f'{base}..HEAD'], worktree).strip()}",
         f"## Diff\n\n```diff\n{diff.strip()}\n```",
     ]
+    if security:
+        from ..review_focus import SECURITY_CHECKLIST
+        parts.insert(2, "## Security review\n\n" + SECURITY_CHECKLIST.format(reasons="; ".join(security)))
     return "\n\n".join(parts) + "\n"
 
 
+def review_needs(task: dict, worktree: Path, board_cfg: dict) -> tuple[list[str], int]:
+    """(security reasons, independent passes required) for a task's change, by fixed rules."""
+    from ..review_focus import security_reasons
+    base = task.get("base_commit") or "HEAD~1"
+    paths = [p for p in _git_out(["diff", "--name-only", f"{base}..HEAD"], worktree).splitlines() if p]
+    reasons = security_reasons(paths, _git_out(["diff", f"{base}..HEAD"], worktree), bool(task.get("security")))
+    second = board_cfg.get("second_review") or []
+    needs_two = (task.get("size") in second) or ("security" in second and bool(reasons))
+    return reasons, 2 if needs_two else 1
+
+
 def prepare_review(aos: AOS, board: Board, task: dict, worktree: Path, project_path: Path,
-                   aos_bin: str) -> tuple[RunSpec, dict]:
+                   aos_bin: str, security: list[str] | None = None) -> tuple[RunSpec, dict]:
     """Inputs for the reviewer: same tool as the worker, fresh session, read-only tools."""
     settings = {**profile_settings(aos, task["worker"], task["project"]), "model": resolve_model(aos, task)[0]}
     allowed = [a for a in settings["allowed_tools"] if not any(a == d or a.startswith(d) for d in _REVIEW_DENY)]
@@ -388,7 +403,7 @@ def prepare_review(aos: AOS, board: Board, task: dict, worktree: Path, project_p
     settings = {**settings, "allowed_tools": allowed}
     run_dir = board.data / "runs" / f"{task['id']}-review-{task.get('review_attempts', 0)}"
     context_file = run_dir / "context.md"
-    write_atomic(context_file, build_review_context(aos, board, task, Path(worktree)))
+    write_atomic(context_file, build_review_context(aos, board, task, Path(worktree), security))
     prompt = f"Review task #{task['id']}: {task['title']}. Follow the reviewer protocol and end with one verdict."
     spec = RunSpec(task=task, project_path=Path(project_path), worktree=Path(worktree), run_dir=run_dir,
                    context_file=context_file, prompt=prompt,
