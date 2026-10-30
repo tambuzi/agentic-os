@@ -70,7 +70,7 @@ Full details and options are in [1. Setup](#1-setup-once-per-machine). The short
 |---|---|
 | Something seems broken or not installed | `aos doctor` |
 | The assistant doesn't mention agenticOS | restart the tool in the project; `aos context --project .` shows what it should get |
-| A feature seems stuck | `aos board` (lists blocked tasks, questions and pending permissions) |
+| A feature seems stuck | `aos board` (lists blocked tasks and pending permissions) |
 | You want to know what a helper did | `aos task show <id> --log` |
 | `No module named 'aos'` | the venv is in an iCloud folder; recreate it at `~/.agenticos/venv` |
 
