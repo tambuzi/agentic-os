@@ -435,6 +435,10 @@ def cmd_board_watch(a) -> int:
     return 0
 
 
+def _cost_text(usd: float, credits: float) -> str:
+    return ", ".join([f"${usd:.2f}"] * bool(usd) + [f"{credits:.2f} credits"] * bool(credits))
+
+
 def cmd_board(a) -> int:
     if a.action == "watch":
         return cmd_board_watch(a)
@@ -454,9 +458,9 @@ def cmd_board(a) -> int:
     for f in board.features():
         if a.feature and f["slug"] != a.feature:
             continue
-        spent = board.feature_cost(f["slug"])
+        spent = _cost_text(board.feature_cost(f["slug"]), board.feature_cost(f["slug"], "credit"))
         print(f"{f['slug']} [{f['status']}] contract v{f['contract_version']}: {f['title']}"
-              + (f"  (${spent:.2f})" if spent else ""))
+              + (f"  ({spent})" if spent else ""))
         for t in board.tasks(feature=f["slug"]):
             extra = ""
             if t["id"] in stuck:
@@ -464,10 +468,10 @@ def cmd_board(a) -> int:
             elif t["status"] == "blocked":
                 blk = [e for e in board.events(f["slug"]) if e["task"] == t["id"] and e["kind"] == "blocker"]
                 extra = f"  {blk[-1]['body'][:80]}" if blk else ""
-            cost = board.task_cost(t["id"])
+            cost = _cost_text(board.task_cost(t["id"]), board.task_cost(t["id"], "credit"))
             tool = f"{t['worker']}/{resolve_model(aos, t)[0] or 'auto'}/{t.get('transport') or '-'}"
             print(f"  #{t['id']:<4} {t['project']:<14} {t['status']:<10} {tool:<18} {t['attempts']}/{t['max_attempts']}"
-                  f"{f'  ${cost:.2f}' if cost else ''}  {t['title']}{extra}")
+                  f"{f'  {cost}' if cost else ''}  {t['title']}{extra}")
         for p in board.permissions(feature=f["slug"], status="pending"):
             print(f"  permission #{p['id']} for #{p['task']}: {p['summary']}  "
                   f"(aos task approve {p['id']} [--always] | aos task deny {p['id']})")
