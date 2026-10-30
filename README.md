@@ -15,6 +15,82 @@ agenticOS is not another agent. Claude Code and Kiro still do the work. agenticO
 
 **Business data never leaves your machine.** Memory, knowledge, lessons, the inbox, the board and the project list live in `~/.agenticos/data`. That folder is outside this repo and outside iCloud-synced folders. Only code, skills, `SOUL.md`, `AGENTS.md` and `aos.yaml` go to GitHub.
 
+## New here? agenticOS for dummies
+
+Someone told you to "use agenticOS". This section explains what that means and gets you started. The rest of this README has the details.
+
+**What it is.** Think of agenticOS as a shared notebook plus a team lead for your AI assistants (Claude Code or Kiro). The notebook holds the team's rules, business facts and how-tos, and every assistant reads it when it starts. The team lead can split a bigger job across several projects, hand the pieces to helper assistants, and check their work. agenticOS does not write code itself: your assistant still does the work, it just knows more and is better organised.
+
+### What you get
+
+- **Your assistant knows the team's rules and business.** It starts every session with them, so you don't repeat yourself.
+- **It remembers what it learns.** Facts you tell it are kept for next time, in every linked project.
+- **It can deliver one feature across several projects.** It plans with you, then runs helpers in parallel, one per project.
+- **It asks before risky things.** Helpers can only use the tools a project allows; anything else waits for your yes or no.
+- **It learns from mistakes.** When a helper gets corrected, agenticOS writes a short lesson, and you confirm or reject it.
+- **Costs are tracked.** Each helper run records what it cost, and you can set budgets.
+
+Your business data stays on your machine, in `~/.agenticos/data`. Only code and shared how-tos go to GitHub.
+
+### Your first 15 minutes
+
+Full details and options are in [1. Setup](#1-setup-once-per-machine). The short version:
+
+1. Install the `aos` command (Python 3.11 or newer, macOS or Linux):
+   ```bash
+   git clone https://github.com/tambuzi/agentic-os.git ~/agenticOS
+   python3 -m venv ~/.agenticos/venv
+   ~/.agenticos/venv/bin/pip install -e ~/agenticOS
+   mkdir -p ~/.local/bin && ln -sf ~/.agenticos/venv/bin/aos ~/.local/bin/aos
+   ```
+   On a Mac, keep the venv out of `~/Desktop` and `~/Documents` (iCloud breaks it).
+2. Point it at the repo: `aos init ~/agenticOS`
+3. Say which assistant you use: `aos worker claude` or `aos worker kiro`. With Claude, also run `aos acp install claude` (needs Node).
+4. Check everything: `aos doctor`. You want `ok` on the main lines. A graphskill warning is fine for now.
+5. Connect one project: `aos link ~/code/my-project`
+6. Open (or restart) Claude Code or Kiro in that project. If Claude Code asks to approve the `aos` server, say yes.
+7. Try it: ask *"What do you know about this project and our team rules?"* Then ask *"Onboard this project into agenticOS"*. It will ask you up to five questions and save the answers.
+
+### Everyday use in plain words
+
+**Ask about the business.** *"What do we know about refunds?"* The assistant searches the team's knowledge docs and memory before it answers. To add a doc, drop a markdown file in `~/.agenticos/data/knowledge/`.
+
+**Teach it something.** *"Remember that invoices go out on the 1st."* Facts about you or this project are saved right away. Facts for the whole team wait in the inbox until someone approves them: `aos inbox list`, then `aos inbox apply <id>` or `aos inbox reject <id>`.
+
+**Deliver a feature across projects.** Say *"deliver a feature"* and describe it. The `aos-feature` skill plans it with you, waits for your OK, starts one helper per project, and only comes back to you when it needs a decision. Each helper works on its own copy of the project, so your checkout is never touched and nothing is pushed.
+- Watch progress in another terminal: `aos board`
+- A helper asks permission: `aos task approve <request id>` or `aos task deny <request id>` (the number is shown by `aos board`)
+- Change a helper's direction while it works: `aos task steer <task id> "use the v2 endpoint"`
+
+**Review what it learned.** At the end of a feature it lists the lessons it learned. Confirm or reject them in the chat, or later with `aos lessons`, then `aos lessons confirm <project>/<id>` or `aos lessons reject <project>/<id>`.
+
+### When something looks wrong
+
+| You see | Run this |
+|---|---|
+| Something seems broken or not installed | `aos doctor` |
+| The assistant doesn't mention agenticOS | restart the tool in the project; `aos context --project .` shows what it should get |
+| A feature seems stuck | `aos board` (lists blocked tasks and pending permissions) |
+| You want to know what a helper did | `aos task show <id> --log` |
+| `No module named 'aos'` | the venv is in an iCloud folder; recreate it at `~/.agenticos/venv` |
+
+More fixes: [Troubleshooting](#troubleshooting).
+
+### Words you'll see
+
+| Word | Plain meaning |
+|---|---|
+| Memory | Short facts (team, project, you) that the assistant reads at the start of every session. |
+| Knowledge | Longer business docs the assistant searches when it needs them. |
+| Skill | A written step-by-step procedure the assistant follows for a kind of task. |
+| Lesson | A rule learned from a correction, like "when changing a model, add a migration". |
+| Inbox | Proposed changes to team-wide memory, waiting for a person to approve. |
+| Board | The local list of tasks for a feature, and who is working on what. |
+| Worker | A helper assistant (Claude Code or Kiro) that does one board task. |
+| Worktree | A separate copy of a project's code where a worker makes its changes. |
+| MCP | The standard way assistants get extra tools; agenticOS adds its tools this way. |
+| ACP | The protocol aos uses to talk to a running worker, so it can ask you and take guidance live. |
+
 ---
 
 ## 1. Setup (once per machine)
