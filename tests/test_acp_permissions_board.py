@@ -171,3 +171,17 @@ def test_a_refused_permission_resets_the_stall_clock(env, how):
     finally:
         for r in list(d.running.values()):
             d._terminate(r)
+
+
+def test_always_without_a_rule_says_it_was_allowed_once(env, capsys):
+    repo, b, t, _ = env
+    p = b.request_permission(t, "fetch https://example.com", rule=None)
+    capsys.readouterr()
+    assert main(["task", "approve", str(p), "--always"]) == 0
+    out = capsys.readouterr().out
+    assert "(always)" not in out and "once" in out and "no reusable rule" in out
+    assert b.permission(p)["always"] == 0
+    assert not any("(always)" in e["body"] for e in b.task_events(t))
+    q = b.request_permission(t, "edit files (no path given)", rule=None)
+    r = BoardTools(AOS(repo)).permission_decide(q, approve=True, always=True)
+    assert r["status"] == "approved" and "no reusable rule" in r["message"]

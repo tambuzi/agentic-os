@@ -414,8 +414,9 @@ class BoardTools:
     @_safe
     def permission_decide(self, permission: int, approve: bool, always: bool = False) -> dict:
         p = self.board.decide_permission(permission, approve, always, author="human")
-        return {"permission": p["id"], "status": p["status"],
-                "message": "the waiting worker gets the answer at the dispatcher's next tick"}
+        once = " Allowed once: this request has no reusable rule." if always and approve and not p["always"] else ""
+        return {"permission": p["id"], "status": p["status"], "always": bool(p["always"]),
+                "message": "the waiting worker gets the answer at the dispatcher's next tick." + once}
 
     @_safe
     def task_steer(self, task: int, message: str, now: bool = False) -> dict:

@@ -380,10 +380,12 @@ class Board:
             if p["status"] != "pending":
                 raise AosError(f"permission request #{pid} is already {p['status']}")
             status = "approved" if approve else "denied"
+            once = approve and always and not p["rule"]  # nothing reusable to remember: allowed once
+            always = approve and always and not once
             c.execute("UPDATE permissions SET status=?, always=?, decided=? WHERE id=?",
-                      (status, 1 if (approve and always) else 0, now(), int(pid)))
-            self._event(c, p["feature"], p["task"], "decision", author,
-                        f"permission #{pid} {status}{' (always)' if approve and always else ''}: {p['summary']}")
+                      (status, 1 if always else 0, now(), int(pid)))
+            how = " (always)" if always else " (once: no reusable rule)" if once else ""
+            self._event(c, p["feature"], p["task"], "decision", author, f"permission #{pid} {status}{how}: {p['summary']}")
         return self.permission(pid)
 
     def expire_permission(self, pid: int, why: str) -> None:

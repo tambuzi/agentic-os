@@ -382,8 +382,11 @@ def cmd_task(a) -> int:
             board.set_model(a.id, None, author="human", why=f" (model reset: {t['model']} doesn't fit {tool})")
         print(f"task #{a.id} queued again")
     elif a.action in ("approve", "deny"):
-        p = board.decide_permission(a.id, a.action == "approve", getattr(a, "always", False))
-        print(f"permission #{p['id']} {p['status']}{' (always)' if p['always'] else ''}: {p['summary']}")
+        always = getattr(a, "always", False)
+        p = board.decide_permission(a.id, a.action == "approve", always)
+        how = (" (always)" if p["always"] else " once (no reusable rule for this request)"
+               if always and p["status"] == "approved" else "")
+        print(f"permission #{p['id']} {p['status']}{how}: {p['summary']}")
     elif a.action == "steer":
         board.steer(a.id, a.message, now=a.now)
         print(f"task #{a.id}: message sent; a live worker gets it right away, others at their next board_read")
