@@ -149,3 +149,25 @@ def test_an_approved_command_is_not_asked_again_in_the_same_attempt(env, monkeyp
     finally:
         for r in list(d.running.values()):
             d._terminate(r)
+
+
+@pytest.mark.parametrize("how", ["deny", "timeout"])
+def test_a_refused_permission_resets_the_stall_clock(env, how):
+    repo, b, t, tmp_path = env
+    d = Dispatcher(repo, tick=0.05)
+    try:
+        assert wait_for(lambda: pending(b), d)
+        [pid] = d.pending_perms
+        r = d.running[t]
+        r.acp.conn.last_activity = time.monotonic() - 3600  # a long wait for the user
+        if how == "deny":
+            b.decide_permission(pid, approve=False)
+        else:
+            entry = d.pending_perms[pid]
+            d.pending_perms[pid] = (*entry[:5], time.monotonic() - 10**6)
+        d._resolve_permissions()
+        assert pid not in d.pending_perms
+        assert time.monotonic() - r.acp.conn.last_activity < 60
+    finally:
+        for r in list(d.running.values()):
+            d._terminate(r)

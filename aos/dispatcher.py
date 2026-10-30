@@ -477,9 +477,11 @@ class Dispatcher:
                         r.allowed = [*(r.allowed or []), rule]
                     self._answer_permission(r, req_id, options, "allow")  # never the agent's own "always"
                 elif p["status"] in ("denied", "expired"):
+                    r.acp.conn.last_activity = time.monotonic()
                     self._answer_permission(r, req_id, options, "reject")
                 elif time.monotonic() - asked > timeout:
                     self.board.expire_permission(pid, "no answer in time")
+                    r.acp.conn.last_activity = time.monotonic()
                     self._answer_permission(r, req_id, options, "reject")
                 else:
                     continue
