@@ -558,7 +558,13 @@ class LearnerTools:
                                                          general_rule))
 
     def lesson_contradict(self, id: str, evidence_events: list[int], why: str) -> dict:
-        return self._write(lambda: self._store().contradict(id, self._evidence(evidence_events), why))
+        r = self._write(lambda: self._store().contradict(id, self._evidence(evidence_events), why))
+        if r.get("ok") and r["status"] == "rejected":  # the store has no board: the timeline is noted here
+            self.board.log_event(self.task["id"], "status",
+                                 f"lesson {self.task['project']}/{r['id']} rejected automatically "
+                                 f"(confidence {r['confidence']:g}): {' '.join(str(why).split())[:300]}",
+                                 author=f"learner:{self.task['id']}")
+        return r
 
     def learning_done(self, summary: str) -> dict:
         if self.done:
