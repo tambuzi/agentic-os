@@ -21,7 +21,12 @@ You run the whole flow in this conversation. The user only steps in for decision
 6. Draft the **tasks**:
    - one project each, about one PR in size;
    - each spec names the real files and symbols, which contract sections it implements, and how to test it;
-   - add dependencies only where a consumer truly cannot proceed without the provider.
+   - add dependencies only where a consumer truly cannot proceed without the provider;
+   - give each task a **size**, which picks its model automatically (like Kiro's auto mode):
+     - `trivial`: a mechanical change in one file (rename, config, docs, a one-line fix). It runs on the cheap model.
+     - `small`: one focused change with its test.
+     - `standard`: a feature across a few files, with tests.
+     - `large`: cross-cutting work, a new design, security, concurrency or data migrations, or anything ambiguous. It runs on the strongest model.
 7. Show the brief, contract and task list (`#n project title ← depends on`). Adjust until the user approves. **Do not create anything before approval.**
 
 **Which tool runs the workers?**
@@ -31,7 +36,9 @@ You run the whole flow in this conversation. The user only steps in for decision
 - Use `feature_create(..., worker=)` only when the user wants a different tool for this one feature.
 
 ## 2. Create
-8. `feature_create(slug, title, brief, contract)`, then one `task_create(project, title, feature, spec, depends_on)` per task.
+8. `feature_create(slug, title, brief, contract)`, then one `task_create(project, title, feature, spec, depends_on, size)` per task.
+   - Pass `model=` only when the user chose a model by hand. That can be for one task, or for the whole feature with `feature_create(..., model=)`. Otherwise the size decides.
+   - If a task fails because it was harder than its size suggested, offer `task_retry(task, note, model=)` with a stronger model.
 
 ## 3. Run
 9. **In Kiro** you may offer the Workflows panel instead: call `feature_workflow(feature)` and tell the user to press **Run** on `aos-<feature>`. That workflow then does steps 10-12 itself; you are done after reporting the path. **Otherwise** (Claude Code, or the user prefers this chat), call `board_start(feature)` and continue.

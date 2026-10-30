@@ -36,8 +36,10 @@ DEFAULTS = {
             "allowed_tools": ["read", "write", "shell:git status", "shell:git diff", "shell:git log",
                               "shell:git add", "shell:git commit", "mcp:aos", "mcp:graphskill"],
         },
-        "claude": {"model": "sonnet", "transport": "acp", "acp_adapter": None, "learning_model": "haiku"},
-        "kiro": {"model": None, "transport": "acp", "learning_model": None},
+        # tiers: the model a task's size picks when nobody chose one by hand (auto mode)
+        "claude": {"model": "sonnet", "transport": "acp", "acp_adapter": None, "learning_model": "haiku",
+                   "tiers": {"trivial": "haiku", "small": "sonnet", "standard": "sonnet", "large": "opus"}},
+        "kiro": {"model": None, "transport": "acp", "learning_model": None, "tiers": {}},  # {}: Kiro's own auto
     },
 }
 

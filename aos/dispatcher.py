@@ -127,12 +127,14 @@ def _warn(msg: str) -> None:
 
 class Dispatcher:
     def __init__(self, repo: str | Path, *, feature: str | None = None, parallel: int | None = None,
-                 tick: float = 2.0, worker: str | None = None):
+                 tick: float = 2.0, worker: str | None = None, model: str | None = None):
         self.aos = AOS(repo)
         board_cfg = self.aos.settings["board"]
         self.board = Board(self.aos.data, board_cfg["max_tasks_per_feature"])
         self.feature = feature
         self.worker = worker  # run override: launch every task with this tool
+        self.model = model    # run override: launch every task on this model (where it fits the tool)
+        self._model_misfits: set[int] = set()
         setting = parallel if parallel is not None else board_cfg["parallel"]
         # `auto`: the ceiling is max_parallel; free memory decides each start (see _may_start)
         self.parallel = int(board_cfg.get("max_parallel", 6) if str(setting) == "auto" else setting)
@@ -699,7 +701,7 @@ class Dispatcher:
             project_path = linked_project_path(t["project"])
             wt = worktree_path(self.aos.home, t["feature"], t["project"])
             aos = AOS(self.aos.repo, home=self.aos.home, slug=t["project"], data=self.aos.data)
-            spec, settings = prepare_review(aos, self.board, task, wt, project_path, self.aos_bin)
+            spec, settings = prepare_review(aos, self.board, self._run_model(task), wt, project_path, self.aos_bin)
             mod = adapter(settings["adapter"])
             log_path = self.board.data / "logs" / f"{tid}-review-{task['review_attempts']}.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -777,11 +779,37 @@ class Dispatcher:
         except Exception as e:  # promotion is a proposal; never let it break the dispatcher
             _warn(f"lesson promotion: {e}")
 
-    def _launch(self, t: dict) -> None:
+    def _apply_run_overrides(self, t: dict) -> dict:
+        """`aos board run --worker/--model`: switch the stored task, visibly. A hand-chosen model
+        that doesn't fit the new tool goes back to auto; a --model that doesn't fit is skipped."""
+        from .workers.common import _fits, profile_settings
         tid = t["id"]
         if self.worker and t["worker"] != self.worker:
             self.board.set_worker(tid, self.worker, why=" for this run (aos board run --worker)")
             t = {**t, "worker": self.worker}
+            settings = profile_settings(self.aos, self.worker, t["project"])
+            if t.get("model") and not _fits(settings, self.worker, t["model"]):
+                self.board.set_model(tid, None, why=f" (model reset: {t['model']} doesn't fit {self.worker})")
+                t = {**t, "model": None}
+        return t
+
+    def _run_model(self, task: dict) -> dict:
+        """`aos board run --model`: this run only, never stored. A model that doesn't fit the
+        task's tool is skipped, noted once per task per run."""
+        from .workers.common import _fits, profile_settings
+        if not self.model or task.get("model") == self.model:
+            return task
+        if _fits(profile_settings(self.aos, task["worker"], task["project"]), task["worker"], self.model):
+            return {**task, "model": self.model}
+        if task["id"] not in self._model_misfits:
+            self._model_misfits.add(task["id"])
+            self.board.log_event(task["id"], "status", f"--model {self.model} doesn't fit {task['worker']}; "
+                                                       f"this run uses {task.get('model') or 'auto'}")
+        return task
+
+    def _launch(self, t: dict) -> None:
+        tid = t["id"]
+        t = self._apply_run_overrides(t)
         over = self._over_budget(t)
         if over:
             self.board.block(tid, over, author="dispatcher")
@@ -800,7 +828,7 @@ class Dispatcher:
         launch = None
         try:
             aos = AOS(self.aos.repo, home=self.aos.home, slug=t["project"], data=self.aos.data)
-            spec, settings = prepare_run(aos, self.board, task, wt, project_path, self.aos_bin)
+            spec, settings = prepare_run(aos, self.board, self._run_model(task), wt, project_path, self.aos_bin)
             mod = adapter(settings["adapter"])
             log_path = self.board.data / "logs" / f"{tid}-{task['attempts']}.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)

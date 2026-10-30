@@ -4,7 +4,19 @@ All notable changes to agenticOS. Format: [Keep a Changelog](https://keepachange
 
 Releases before 0.7.0 were numbered after the fact, one per merged pull request, and are not tagged yet.
 
-## [0.7.0] — unreleased (`feat/learning-loop`)
+## [0.8.0] — unreleased (`feat/model-per-task`)
+
+### Added
+- **Model per task, set by hand:**
+  - `aos task add --model`, `aos feature new --model`, a project's `worker: {model: …}`, `aos task retry --model` (`auto` goes back to auto);
+  - `aos board run --model` applies to that run only and is never stored;
+  - MCP `task_create(model=)` / `feature_create(model=)` / `task_retry(model=)`;
+  - precedence: task > feature > project.
+- **Auto mode:** a task's **size** (`trivial | small | standard | large`) picks the tool's model tier when nobody chose a model by hand. Claude's tiers are haiku / sonnet / sonnet / opus; Kiro's own auto mode decides by default. The `aos-feature` planner sizes every task, and you can pass `aos task add --size`.
+- A model that doesn't fit the task's tool is refused when given directly. Claude ids use hyphens (`claude-opus-4-1`); Kiro's own names are dotted (`claude-sonnet-4.5`). When `--worker` switches a task's tool (`board run` or `task retry`), a hand-chosen model that doesn't fit the new tool goes back to auto, with a timeline note.
+- `aos board` shows `tool/model/transport`; `aos task show` and `board_status` say where the model came from.
+
+## [0.7.0] — 2026-10-29 (PR #8)
 
 ### Added
 - **Learning loop from the board.** When a board task finishes after a correction, a short read-only *learner* run turns it into a lesson.
