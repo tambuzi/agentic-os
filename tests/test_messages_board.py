@@ -103,7 +103,7 @@ def test_question_to_a_finished_task_gets_the_automatic_reply(b):
 def test_question_to_a_task_in_review_gets_the_automatic_reply(b):
     b.complete(1, "Added POST /orders", author="w", to="review")
     q = b.send_message(2, 1, "cents?", question=True)
-    assert q["auto_reply"] and "review" in b.message(q["auto_reply"])["text"]
+    assert q["auto_reply"] and "is waiting for review" in b.message(q["auto_reply"])["text"]
 
 
 def test_escalated_question_is_open_until_answered(b):

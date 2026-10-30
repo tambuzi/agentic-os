@@ -566,7 +566,8 @@ class Board:
             auto, finished = None, target is not None and target["status"] in FINISHED_FOR_MESSAGES
             if finished and question and not escalate:
                 first = (target["result"] or "").strip().splitlines()[0] if (target["result"] or "").strip() else "(no result)"
-                reply = (f"task #{target['id']} ({target['project']}) is {target['status']}; its worker has ended. "
+                state = {"review": "waiting for review"}.get(target["status"], target["status"])
+                reply = (f"task #{target['id']} ({target['project']}) is {state}; its worker has ended. "
                          f"Its result: {first}. Its commits are on branch feature/{target['feature']} in the "
                          f"{target['project']} worktree. If you need more, ask again with escalate=true and the "
                          f"planner will answer.")
