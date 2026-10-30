@@ -122,3 +122,11 @@ def test_editing_an_existing_lint_or_hook_config_asks(wt, name):
 
 def test_creating_a_lint_config_is_fine(wt):
     assert decide(call("edit", raw={"file_path": str(wt / ".prettierrc")}), ALLOWED, wt).decision == "allow"
+
+
+def test_a_shell_command_that_looks_like_an_mcp_name_is_a_command(wt):
+    allowed = [*ALLOWED, "mcp:scripts"]
+    d = decide(call("execute", "scripts/x.sh", {"command": "scripts/x.sh"}), allowed, wt)
+    assert d.decision == "ask" and d.rule == "shell:scripts/x.sh" and "run `scripts/x.sh`" in d.summary
+    d = decide(call("other", "scripts/x.sh", {"command": "scripts/x.sh --fast"}), allowed, wt)
+    assert d.decision == "ask" and d.rule == "shell:scripts/x.sh --fast"
