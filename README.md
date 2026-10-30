@@ -395,6 +395,13 @@ How it works:
   - The timeline says why.
 - **Two independent reviewers** for risky tasks are optional: `board.second_review: [large, security]`. Both must pass, and the second one starts fresh, without the first one's verdict.
 
+**Operation types.** The planner can tag each task as a `feature`, `change`, `fix` or `refactor` (`aos task add --op fix`, `task_create(operation="fix")`). The tag sets the worker's first move and what its reviewer checks:
+- a `fix` starts by reproducing the bug as a failing test, and fails review without that regression test;
+- a `refactor` must not change behaviour, and fails review if tests are deleted, skipped or weakened;
+- a `change` updates the existing tests to the new behaviour, and a `feature` adds tests for the new behaviour.
+
+Untagged tasks work as before. `aos task show`, `aos board` (`[fix] title`) and `board_status` show the tag.
+
 **Safety rails:**
 - the same failure twice stops a task;
 - an interrupted attempt makes the next one inspect the repository first;

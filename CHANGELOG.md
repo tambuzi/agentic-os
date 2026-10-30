@@ -6,6 +6,13 @@ Releases before 0.7.0 were numbered after the fact, one per merged pull request,
 
 ## [0.11.0] — unreleased (`feat/operation-types`)
 
+### Added
+- **Operation types** for board tasks: `feature`, `change`, `fix` or `refactor`, optional (an untagged task works as before). Set with `aos task add --op` or `task_create(operation=)` (planner and worker tools); an unknown value is refused with the allowed list.
+- The worker's context gets a "How to do this <operation>" section with its first move: a `fix` reproduces the bug as a failing test first and names that test in its `task_complete` summary; a `refactor` keeps behaviour and existing tests unchanged; a `change` updates its tests to the new behaviour; a `feature` adds tests for the new behaviour.
+- The reviewer's context gets what to check: a `fix` without a regression test, or a `refactor` that deletes, skips or weakens tests, is a `review_fail`; for `change` and `feature`, the tests must cover the new or changed behaviour.
+- `aos task show` prints `operation:`, `aos board` tags the title (`[fix] …`) and `board_status` tasks include `operation`.
+- The `aos-feature` skill gives each task an operation when drafting tasks.
+
 ## [0.10.0] — 2026-10-30 (PRs #12, #13, #14)
 
 ### Added

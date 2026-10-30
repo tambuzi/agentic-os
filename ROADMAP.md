@@ -140,11 +140,11 @@ Let workers in the same feature talk directly, on top of ACP live delivery. Toda
 
   Catches regressions like the planning skill not using separate workers, or not using graphskill.
 
-## 4b. Task sizing and review depth (sizes, trivial skip, security review, second reviewer done 2026-10-30)
+## 4b. Task sizing and review depth (sizes, trivial skip, security review, second reviewer, operation types done 2026-10-30)
 
 - [x] `aos-feature` tags each task with an operation (`feature`, `change`, `fix`, `refactor`) and a size (`trivial`, `small`, `standard`, `large`) when planning (ECC `orch-pipeline`):
   - trivial tasks skip the reviewer;
-  - a fix starts by reproducing the bug as a failing test.
+  - a fix starts by reproducing the bug as a failing test, and its reviewer fails it without a regression test (operation types, 0.11.0).
 - [x] Security trigger: a diff touching auth, user input, database queries, file paths, secrets or crypto gets a security-focused reviewer.
 - [x] `board.second_review: [large, security]`: two independent reviewers must both pass (ECC `santa-method`).
 - [ ] Optional: a council of fresh-context voices (skeptic, pragmatist, critic) for contract decisions (ECC `council`).
