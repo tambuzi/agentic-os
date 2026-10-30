@@ -195,6 +195,11 @@ def cmd_doctor(a) -> int:
         for w in warnings:
             line(False, w)
     line(True, f"lessons: {count} in {len(projects)} project{'s' if len(projects) != 1 else ''}")
+    from . import sessions as S
+    pending, failed = S.entries(aos.data, "pending"), S.entries(aos.data, "failed")
+    line(not failed, f"session learning: {len(pending)} pending, {len(failed)} failed")
+    for e in failed:
+        line(False, f"session {e['id']} ({e['project']}): {e.get('reason') or 'failed'}")
     return 0
 
 
@@ -220,6 +225,8 @@ def cmd_lessons(a) -> int:
     if words[:1] == ["capture"]:
         return _lessons_capture(a)
     aos = AOS(repo_root())
+    if words[:1] in (["sessions"], ["learn-sessions"], ["learn-session"]):
+        return _lessons_sessions(aos, a, words)
     if words and words[0] in ("show", "confirm", "reject", "learn"):
         if len(words) != 2:
             raise AosError(f"usage: aos lessons {words[0]} {'<task>' if words[0] == 'learn' else '<project>/<id>'}")
@@ -254,6 +261,29 @@ def cmd_lessons(a) -> int:
                 shown += 1
     if not shown:
         print("no lessons yet" if not a.all else "no lessons")
+    return 0
+
+
+def _lessons_sessions(aos: AOS, a, words: list[str]) -> int:
+    from . import session_learner, sessions
+    if words[0] == "sessions":
+        found = sessions.entries(aos.data)
+        if not found:
+            print("no sessions queued")
+        for e in found:
+            print(f"{e['id']:<34} {e['tool']:<6} {e['project']:<14} {e['status']:<8} tries {e['tries']}"
+                  f"{'  ' + e['reason'] if e.get('reason') else ''}")
+        return 0
+    if words[0] == "learn-sessions":
+        results = session_learner.learn_pending(aos)
+        print("\n".join(results) if results else "nothing pending")
+        return 0
+    if a.last:
+        print(session_learner.learn_last(aos, a.project_dir or ".", a.tool or "claude"))
+        return 0
+    if len(words) != 2:
+        raise AosError("usage: aos lessons learn-session <id> | --last [--project-dir DIR]")
+    print(session_learner.learn_entry(aos, words[1]))
     return 0
 
 
@@ -701,6 +731,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--transcript", help="capture: the session transcript (default: the hook's stdin JSON)")
     s.add_argument("--session", help="capture: the session id")
     s.add_argument("--project-dir", help="capture: the project the session ran in")
+    s.add_argument("--last", action="store_true", help="learn-session: the project's most recent session")
     s.set_defaults(fn=cmd_lessons)
 
     s = sub.add_parser("acp", help="live agent sessions (ACP) for board workers")

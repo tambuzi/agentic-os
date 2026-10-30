@@ -198,7 +198,7 @@ def entries(data, status: str | None = None) -> list[dict]:
 
 
 def enqueue(data, tool: str, session: str, project: str, project_dir: str, transcript: str,
-            hits: list[dict]) -> dict | None:
+            hits: list[dict], all_turns: bool = False) -> dict | None:
     """Queue the hits not already queued for this session; None when nothing is new."""
     seen = {h["key"] for e in entries(data) if e.get("tool") == tool and e.get("session") == session
             for h in e.get("hits", [])}
@@ -207,7 +207,8 @@ def enqueue(data, tool: str, session: str, project: str, project_dir: str, trans
         return None
     entry = {"id": f"{time.strftime('%Y%m%d-%H%M%S')}-{tool}-{_secrets.token_hex(3)}", "tool": tool,
              "session": session, "project": project, "project_dir": str(project_dir), "transcript": str(transcript),
-             "hits": new, "status": "pending", "tries": 0, "reason": "", "created": _now()}
+             "hits": new, "status": "pending", "tries": 0, "reason": "", "created": _now(),
+             **({"all_turns": True} if all_turns else {})}
     _save(data, entry)
     return entry
 
@@ -237,6 +238,21 @@ def finish(data, entry_id: str, ok: bool, reason: str = "") -> None:
             e["status"] = "failed" if e["tries"] >= MAX_TRIES else "pending"
             e["reason"] = reason
         _save(data, e)
+
+
+def release(data, entry_id: str, reason: str) -> None:
+    """running → pending without spending a try (e.g. the daily budget is reached)."""
+    path = _path(data, entry_id)
+    with locked(path):
+        e = _load(path)
+        if e and e.get("status") == "running":
+            e["status"], e["reason"] = "pending", reason
+            _save(data, e)
+
+
+def claude_project_folder(project_dir) -> str:
+    """Claude Code keeps a project's transcripts in ~/.claude/projects/<the path, / and . as ->."""
+    return re.sub(r"[^A-Za-z0-9-]", "-", str(Path(project_dir).expanduser().resolve()))
 
 
 def prune(data, days: int = 7) -> int:
