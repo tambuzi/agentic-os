@@ -195,6 +195,10 @@ def cmd_doctor(a) -> int:
         for w in warnings:
             line(False, w)
     line(True, f"lessons: {count} in {len(projects)} project{'s' if len(projects) != 1 else ''}")
+    from . import skill_health as SH
+    used = SH.health(aos.data, aos.settings, aos.repo)
+    bad = [h["skill"] for h in used if h["flagged"]]
+    line(not bad, f"skills: {len(used)} used, {len(bad)} flagged" + (f": {', '.join(bad)}" if bad else ""))
     from . import sessions as S
     pending, failed = S.entries(aos.data, "pending"), S.entries(aos.data, "failed")
     running = S.entries(aos.data, "running")
@@ -219,6 +223,24 @@ def _doctor_models(aos: AOS, line) -> None:
         bad = [f"{m} ({where})" for m, where in configured if m and not _fits(s, name, m)]
         line(not bad, f"models {name}: " + (f"don't fit {name}: {', '.join(bad)} (see workers.{name} in aos.yaml)"
                                             if bad else "fit"))
+
+
+def cmd_skills(a) -> int:
+    from . import skill_health
+    aos = AOS(repo_root())
+    if a.action == "health":
+        rows = skill_health.health(aos.data, aos.settings, aos.repo)
+        if not rows:
+            print("no skill uses recorded yet (they are recorded when a session in a linked project ends)")
+            return 0
+        pct = lambda r: "-" if r is None else f"{r:.0%}"
+        print(f"{'skill':<34} {'uses 7d/30d':<12} {'corrected 7d/30d':<17} trend  tests  last used")
+        for h in rows:
+            tests = "-" if h["tests"] is None else f"{h['tests']:.0%}"
+            print(f"{h['skill']:<34} {h['uses_7']:>3} / {h['uses_30']:<6} {pct(h['rate_7']):>5} / {pct(h['rate_30']):<9}"
+                  f" {h['trend']:<5}  {tests:<5}  {h['last_used']}{'  flagged' if h['flagged'] else ''}")
+        return 0
+    raise AosError(f"unknown skills action {a.action!r}")
 
 
 def cmd_lessons(a) -> int:
@@ -726,6 +748,12 @@ def _parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_board)
     sub.add_parser("status", help="uncommitted agenticOS changes").set_defaults(fn=cmd_status)
     sub.add_parser("doctor", help="check installation").set_defaults(fn=cmd_doctor)
+
+    s = sub.add_parser("skills", help="skill health from real sessions, and skill compliance tests")
+    ssub = s.add_subparsers(dest="action", required=True)
+    h = ssub.add_parser("health", help="uses, corrections and trend per skill")
+    h.add_argument("--days", type=int, default=30)
+    s.set_defaults(fn=cmd_skills)
 
     s = sub.add_parser("lessons", help="lessons learned from board corrections: list [project] [--all], "
                                          "show|confirm|reject <project>/<id>, learn <task>")
