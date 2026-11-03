@@ -185,6 +185,8 @@ aos lessons [project] [--all]     # lessons learned from corrections (board work
 aos lessons confirm|reject <project>/<id>
 aos lessons sessions              # sessions waiting to be learned from
 aos lessons learn-session --last  # learn from your latest session now, even without corrections
+aos skills health                 # how each skill is doing: uses, corrections, trend, flagged
+aos skills test <skill>           # run a skill's compliance tests headless (--validate: check files only)
 aos worker [claude|kiro]          # show or set the tool that runs board work on this machine
 aos acp install claude            # live worker sessions for Claude (Kiro needs nothing)
 aos sync <project>                # re-copy skills/config (also runs at every session start)
@@ -202,6 +204,10 @@ memory:
   user:    {cap: 1375, mode: direct}
 skills:
   mode: direct                        # or inbox, to review agent-written skills
+  health: true                        # record skill uses when your sessions end
+  flag_min_corrected: 3               # flagged: at least 3 corrected uses...
+  flag_rate: 0.4                      # ...and 40% or more of uses corrected, over 30 days
+  proposal_cooldown_days: 14          # at most one fix proposal per skill in this window
 context:
   max_chars: 16000                    # size limit of the session-start context
 board:
@@ -285,6 +291,40 @@ How lessons are used:
 - Settings: `learning.sessions` (the off switch), `learning.sessions_exclude: [project]`, `learning.sessions_daily_budget_usd` (default $1).
 - Kiro sessions: manual trigger only for now.
 
+### Skills: health and tests
+
+**Health from real use.** When a Claude Code session in a linked project ends, aos also records each skill the agent used (`aos-feature`, `superpowers:writing-plans`, …) and whether you corrected the agent soon after: before the next skill use and within 15 turns. It costs nothing and stores no transcript text.
+
+`aos skills health` shows, per skill: uses over 7 and 30 days, how often they were corrected, a trend (↑ better, ↓ worse, = steady), when it was last used and its last test pass rate. A skill is **flagged** when at least 3 uses in 30 days were corrected and that is 40% or more of its uses. `aos doctor` lists flagged skills.
+
+**Fix proposals.** For a flagged skill in this repo's `skills/` (plugin skills are only reported), the background job after a session runs a short **skill improver**. It reads the skill and quoted excerpts of your corrections, and proposes one focused edit in the inbox.
+- `aos inbox show <id>` shows the edit and its evidence; `aos inbox apply <id>` writes it to the skill (see it with `git diff`); `aos inbox reject <id>` declines it.
+- One proposal per skill at a time, and none for 14 days after the last one. An improver run that finds nothing to change proposes nothing.
+- It uses the cheap learning model and counts against `learning.sessions_daily_budget_usd`.
+
+**Compliance tests.** A skill can ship test scenarios in `skills/<name>/tests/<scenario>.yaml`: what "the user" says, and checks on the tool calls the agent makes.
+
+```yaml
+scenario: plan-two-projects
+projects: [api, web]              # throwaway demo projects
+turns:
+  - "Deliver a feature: add a currency field to orders in api and show it in web."
+  - "The plan looks good, approved. Go ahead."
+checks:
+  - calls: code_query             # at_least / at_most (default at_least: 1), distinct: <arg>, where: {arg: value}
+  - before: [code_query, task_create]
+  - calls: task_create
+    at_least: 2
+    distinct: project
+  - never: task_complete
+```
+
+- `aos skills test aos-feature` runs each scenario with real Claude Code (`claude -p`) in a throwaway aos home with throwaway projects, so your data is untouched. Board workers are never launched: `board_start` only records "would start the dispatcher".
+- Each check passes or fails with a reason, such as "task_create called 1×, needed ≥ 2". The report goes to `~/.agenticos/data/skills/tests/` and the pass rate shows in `aos skills health`. The exit code is 0 only when everything passed.
+- `aos skills test <skill> --draft` has a cheap AI run draft a scenario as `tests/draft-<name>.yaml`. Drafts never run: review it, then rename it without `draft-`.
+- `aos skills test --validate` checks every test file without calling any AI; CI runs it on every pull request.
+- `--keep` leaves the throwaway home in place to look at. Each real run costs a Claude session (cents to a dollar).
+
 ### Today vs. next
 
 | Growth path | Status |
@@ -295,7 +335,8 @@ How lessons are used:
 | Agent writes long-form knowledge docs itself | ❌ not yet: agents have no `knowledge_write` tool; they save to memory or a skill instead |
 | **Learning loop from the board**: lessons from corrections, ranked into context, promoted to org memory when confirmed in 2+ projects | ✅ works now |
 | Learning from your own sessions (Claude Code `SessionEnd` hook; Kiro: manual trigger for now) | ✅ works now |
-| Search past sessions; skill health, stock-take and compliance tests | 🔜 ROADMAP item 4 |
+| Skill health from your sessions, fix proposals, compliance tests (`aos skills`) | ✅ works now |
+| Search past sessions; skill stock-take | 🔜 ROADMAP item 4 |
 | Import from Notion/Confluence into `knowledge/` | 🔜 ROADMAP item 5 |
 | Multi-project features with parallel Claude Code / Kiro workers (board) | ✅ works now |
 

@@ -323,6 +323,8 @@ def capture(home, data, settings: dict, tool: str, transcript, session: str | No
             launch=None) -> str:
     """Called by the end-of-session hook: find corrections and queue them. Fast, never raises."""
     try:
+        if os.environ.get("AOS_SKILL_TEST") == "1":
+            return "skill test session"  # `aos skills test` demo sessions teach nothing
         learning = settings.get("learning") or {}
         if not learning.get("enabled", True) or not learning.get("sessions", True):
             return "off"
@@ -339,8 +341,15 @@ def capture(home, data, settings: dict, tool: str, transcript, session: str | No
         if tool != "claude":
             return f"{tool} capture not available yet"
         turns = read_claude_transcript(transcript)
+        found = find_corrections(turns)
+        if (settings.get("skills") or {}).get("health", True):
+            try:  # skill health: every session's skill uses, corrected or not (no text stored)
+                from .skill_health import record_uses, skill_uses
+                record_uses(data, tool, slug, session or Path(transcript).stem, skill_uses(turns, found))
+            except Exception as e:
+                _log(data, f"skill uses not recorded: {type(e).__name__}: {e}")
         hits, keys = [], set()
-        for h in find_corrections(turns):
+        for h in found:
             key = hit_key(turns[h.index], h.kind)
             if key not in keys:
                 keys.add(key)

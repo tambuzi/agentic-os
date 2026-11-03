@@ -105,7 +105,8 @@ def cmd_serve(a) -> int:
     from .mcp_server import run_server
     if a.learn and (a.review or a.task is None):
         raise AosError("--learn needs --task and cannot be combined with --review")
-    run_server(a.project, a.task, a.attempt, a.review, learn=a.learn, learn_session=a.learn_session)
+    run_server(a.project, a.task, a.attempt, a.review, learn=a.learn, learn_session=a.learn_session,
+               improve_skill=a.improve_skill, draft_skill=a.draft_skill)
     return 0
 
 
@@ -195,6 +196,10 @@ def cmd_doctor(a) -> int:
         for w in warnings:
             line(False, w)
     line(True, f"lessons: {count} in {len(projects)} project{'s' if len(projects) != 1 else ''}")
+    from . import skill_health as SH
+    used = SH.health(aos.data, aos.settings, aos.repo)
+    bad = [h["skill"] for h in used if h["flagged"]]
+    line(not bad, f"skills: {len(used)} used, {len(bad)} flagged" + (f": {', '.join(bad)}" if bad else ""))
     from . import sessions as S
     pending, failed = S.entries(aos.data, "pending"), S.entries(aos.data, "failed")
     running = S.entries(aos.data, "running")
@@ -219,6 +224,47 @@ def _doctor_models(aos: AOS, line) -> None:
         bad = [f"{m} ({where})" for m, where in configured if m and not _fits(s, name, m)]
         line(not bad, f"models {name}: " + (f"don't fit {name}: {', '.join(bad)} (see workers.{name} in aos.yaml)"
                                             if bad else "fit"))
+
+
+def cmd_skills(a) -> int:
+    from . import skill_health
+    aos = AOS(repo_root())
+    if a.action == "health":
+        rows = skill_health.health(aos.data, aos.settings, aos.repo)
+        if not rows:
+            print("no skill uses recorded yet (they are recorded when a session in a linked project ends)")
+            return 0
+        pct = lambda r: "-" if r is None else f"{r:.0%}"
+        print(f"{'skill':<34} {'uses 7d/30d':<12} {'corrected 7d/30d':<17} trend  tests  last used")
+        for h in rows:
+            tests = "-" if h["tests"] is None else f"{h['tests']:.0%}"
+            print(f"{h['skill']:<34} {h['uses_7']:>3} / {h['uses_30']:<6} {pct(h['rate_7']):>5} / {pct(h['rate_30']):<9}"
+                  f" {h['trend']:<5}  {tests:<5}  {h['last_used']}{'  flagged' if h['flagged'] else ''}")
+        return 0
+    if a.action == "test":
+        from . import skill_tests
+        if a.draft:
+            if not a.skill:
+                raise AosError("usage: aos skills test <skill> --draft")
+            path = skill_tests.draft(aos, a.skill)
+            print(f"drafted {path}\nreview it, then rename it without draft- to run it")
+            return 0
+        if a.validate:
+            ok, errors = skill_tests.discover(aos.repo, a.skill, include_drafts=True)
+            for e in errors:
+                print(f"error: {e}")
+            print(f"{len(ok)} test file{'s' * (len(ok) != 1)} ok, {len(errors)} with errors")
+            return 1 if errors else 0
+        skills = [a.skill] if a.skill else sorted({s.skill for s in skill_tests.discover(aos.repo)[0]})
+        if not skills:
+            raise AosError("no skill test files found", "add skills/<name>/tests/<scenario>.yaml")
+        all_ok = True
+        for name in skills:
+            ok, report = skill_tests.run_skill(aos, name, a.scenario, keep=a.keep)
+            print(f"{name}: {'passed' if ok else 'FAILED'} (report: {report})")
+            all_ok &= ok
+        return 0 if all_ok else 1
+    raise AosError(f"unknown skills action {a.action!r}")
 
 
 def cmd_lessons(a) -> int:
@@ -279,6 +325,7 @@ def _lessons_sessions(aos: AOS, a, words: list[str]) -> int:
     if words[0] == "learn-sessions":
         results = session_learner.learn_pending(aos)
         print("\n".join(results) if results else "nothing pending")
+        _improve_flagged(aos)
         return 0
     if a.last:
         print(session_learner.learn_last(aos, a.project_dir or ".", a.tool or "claude"))
@@ -288,7 +335,17 @@ def _lessons_sessions(aos: AOS, a, words: list[str]) -> int:
     print(session_learner.learn_entry(aos, words[1]))
     for r in session_learner.learn_pending(aos, limit=3):  # the next job retries what waited or failed
         print(r)
+    _improve_flagged(aos)
     return 0
+
+
+def _improve_flagged(aos: AOS) -> None:
+    from . import skill_health
+    try:
+        for r in skill_health.improve_flagged(aos):
+            print(f"skill improver: {r}")
+    except Exception as e:  # never fail the background job over it
+        print(f"skill improver: failed: {e}")
 
 
 def _lessons_capture(a) -> int:
@@ -536,6 +593,9 @@ def cmd_board(a) -> int:
     if a.action == "watch":
         return cmd_board_watch(a)
     if a.action == "run":
+        if os.environ.get("AOS_DRY_DISPATCH") == "1":
+            print("would start the dispatcher (AOS_DRY_DISPATCH=1); no workers launched")
+            return 0
         from .dispatcher import Dispatcher
         d = Dispatcher(repo_root(), feature=a.feature, parallel=a.parallel, worker=a.worker, model=a.model)
         print("dispatching (Ctrl-C to stop launching; twice to stop workers)" if not a.once else "dispatching once")
@@ -637,6 +697,8 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--review", action="store_true", help="board reviewer mode: review_pass / review_fail only")
     s.add_argument("--learn", action="store_true", help="board learner mode: lesson tools only")
     s.add_argument("--learn-session", help="session learner mode for this queue entry: lesson tools only")
+    s.add_argument("--improve-skill", help="skill improver mode for this skill: skill_input / propose_skill_patch only")
+    s.add_argument("--draft-skill", help="test drafter mode for this skill: write_test only")
     s.set_defaults(fn=cmd_serve)
 
     s = sub.add_parser("inbox", help="review staged memory/skill proposals")
@@ -726,6 +788,18 @@ def _parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_board)
     sub.add_parser("status", help="uncommitted agenticOS changes").set_defaults(fn=cmd_status)
     sub.add_parser("doctor", help="check installation").set_defaults(fn=cmd_doctor)
+
+    s = sub.add_parser("skills", help="skill health from real sessions, and skill compliance tests")
+    ssub = s.add_subparsers(dest="action", required=True)
+    h = ssub.add_parser("health", help="uses, corrections and trend per skill")
+    h.add_argument("--days", type=int, default=30)
+    t = ssub.add_parser("test", help="run a skill's compliance tests headless (or --validate the files)")
+    t.add_argument("skill", nargs="?")
+    t.add_argument("scenario", nargs="?")
+    t.add_argument("--keep", action="store_true", help="keep the throwaway home and demo projects")
+    t.add_argument("--validate", action="store_true", help="only check the test files; no AI calls")
+    t.add_argument("--draft", action="store_true", help="have a cheap AI run draft a test file to review")
+    s.set_defaults(fn=cmd_skills)
 
     s = sub.add_parser("lessons", help="lessons learned from board corrections: list [project] [--all], "
                                          "show|confirm|reject <project>/<id>, learn <task>")

@@ -1,0 +1,20 @@
+# The aos-feature skill on a feature that spans two projects: it studies the code first,
+# makes one task per project, starts the board, and never does a task itself.
+scenario: plan-two-projects
+tool: claude
+projects: [api, web]
+turns:
+  - "Deliver a feature: add a currency field to orders in api and show it in web. Both repos are new,
+    so the orders code is built from scratch: an ISO 4217 code, USD by default."
+  - "The plan looks good, approved. Go ahead."
+timeout_min: 6
+checks:
+  - calls: code_query
+    at_least: 1
+  - before: [code_query, task_create]
+  - calls: task_create
+    at_least: 2
+    distinct: project
+  - calls: board_start
+    at_least: 1
+  - never: task_complete

@@ -312,6 +312,10 @@ class BoardTools:
         self.board.feature(feature)
         if not self.board.tasks(feature=feature):
             raise AosError(f"feature {feature!r} has no tasks", "create tasks with task_create first")
+        if os.environ.get("AOS_DRY_DISPATCH") == "1":  # skill compliance tests: record it, launch nothing
+            for t in self.board.tasks(feature=feature):
+                self.board.log_event(t["id"], "dispatch", "would start the dispatcher (AOS_DRY_DISPATCH=1)")
+            return {"started": False, "dry_run": True, "message": "would start the dispatcher"}
         st = dispatcher_status(self.board.data)
         if st["running"]:
             if st.get("feature") in (None, feature):
@@ -663,6 +667,81 @@ class LearnerTools:
         return {"ok": True}
 
 
+class SkillImproverTools:
+    """A skill improver run's tools: read one skill and its corrections, propose one edit."""
+
+    def __init__(self, aos: AOS, name: str):
+        self.aos, self.name, self.done = aos, name, False
+
+    def skill_input(self) -> dict:
+        from .skill_health import improver_input
+        return {**improver_input(self.aos, self.name), "note": QUOTE_NOTE.replace("from the board", "from user sessions")}
+
+    def propose_skill_patch(self, old: str, new: str, reason: str) -> dict:
+        from .skill_health import propose
+        if self.done:
+            return {"ok": False, "error": "one proposal per run; it is already staged"}
+        try:
+            pid = propose(self.aos, self.name, old, new, reason)
+        except AosError as e:
+            return {"ok": False, "error": e.message}
+        self.done = True
+        return {"ok": True, "proposal": pid}
+
+
+class SkillDraftTools:
+    """A test drafter run's one tool: save a validated draft test file for one skill."""
+
+    def __init__(self, aos: AOS, name: str):
+        self.aos, self.name, self.done = aos, name, False
+
+    def write_test(self, yaml_text: str) -> dict:
+        from .skill_tests import write_draft
+        if self.done:
+            return {"ok": False, "error": "one draft per run; it is already saved"}
+        try:
+            path = write_draft(self.aos.repo, self.name, yaml_text)
+        except AosError as e:
+            return {"ok": False, "error": e.message}
+        self.done = True
+        return {"ok": True, "path": str(path)}
+
+
+def build_drafter_server(dt: SkillDraftTools):
+    try:
+        from mcp.server.mcpserver import MCPServer as Server
+    except ImportError:
+        from mcp.server.fastmcp import FastMCP as Server
+    mcp = Server("aos")
+
+    @mcp.tool()
+    def write_test(yaml_text: str) -> dict:
+        """Save the drafted test file (YAML, the drafter protocol's format). Errors say what to fix."""
+        return dt.write_test(yaml_text)
+
+    return mcp
+
+
+def build_improver_server(st: SkillImproverTools):
+    try:
+        from mcp.server.mcpserver import MCPServer as Server
+    except ImportError:
+        from mcp.server.fastmcp import FastMCP as Server
+    mcp = Server("aos")
+
+    @mcp.tool()
+    def skill_input() -> dict:
+        """The skill's current text and quoted excerpts of the corrections users made after agents used it. Call first."""
+        return st.skill_input()
+
+    @mcp.tool()
+    def propose_skill_patch(old: str, new: str, reason: str) -> dict:
+        """Propose ONE focused edit: `old` must occur exactly once in the skill; `new` replaces it (≤ 2000 characters). The user approves it in the inbox."""
+        return st.propose_skill_patch(old, new, reason)
+
+    return mcp
+
+
 def build_learner_server(lt: LearnerTools):
     """Only the learner tools: no memory, skills, code or board writes."""
     try:
@@ -946,7 +1025,8 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
 
 
 def run_server(project: str | Path, task: int | None = None, attempt: int | None = None,
-               review: bool = False, learn: bool = False, learn_session: str | None = None) -> None:
+               review: bool = False, learn: bool = False, learn_session: str | None = None,
+               improve_skill: str | None = None, draft_skill: str | None = None) -> None:
     from .link import sync
 
     cfg = load_user_config()
@@ -962,7 +1042,11 @@ def run_server(project: str | Path, task: int | None = None, attempt: int | None
     cwd = os.getcwd()
     os.chdir(Path.home())  # FastMCP reads .env from cwd; keep project env files out of it
     try:
-        if learn or learn_session:
+        if draft_skill:
+            mcp = build_drafter_server(SkillDraftTools(aos, draft_skill))
+        elif improve_skill:
+            mcp = build_improver_server(SkillImproverTools(aos, improve_skill))
+        elif learn or learn_session:
             board = Board(aos.data, aos.settings["board"]["max_tasks_per_feature"])
             max_ops = int((aos.settings.get("learning") or {}).get("max_ops_per_run", 3))
             if learn_session:
