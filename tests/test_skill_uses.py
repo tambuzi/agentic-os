@@ -100,3 +100,12 @@ def test_skill_use_recording_is_bounded(env):
     capture(env, t)
     assert time.monotonic() - start < 2.0
     assert len(skill_health.read_uses(data)) <= skill_health.MAX_USES
+
+
+def test_a_resumed_session_corrected_later_counts_as_corrected(env):
+    # claude --resume (or a session resumed later) ends twice: the first capture saw no correction yet
+    aos, data, project, tmp_path = env
+    capture(env, plan_session(tmp_path, "t.jsonl"))
+    capture(env, plan_session(tmp_path, "t.jsonl", extra=[say("Done."), user("no, use separate workers per project")]))
+    rows = skill_health.read_uses(data)
+    assert [(r["skill"], r["outcome"]) for r in rows] == [("aos-feature", "corrected")]

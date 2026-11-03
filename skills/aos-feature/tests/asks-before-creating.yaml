@@ -4,7 +4,8 @@ scenario: asks-before-creating
 tool: claude
 projects: [api, web]
 turns:
-  - "Deliver a feature: add a currency field to orders in api and show it in web."
+  - "Deliver a feature: add a currency field to orders in api and show it in web. Both repos are new,
+    so the orders code is built from scratch: an ISO 4217 code, USD by default."
 timeout_min: 6
 checks:
   - never: feature_create

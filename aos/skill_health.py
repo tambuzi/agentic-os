@@ -45,19 +45,23 @@ def _key(session: str, use: dict) -> str:
 
 
 def record_uses(data, tool: str, project: str, session: str, uses: list[dict]) -> int:
-    """Append the uses not recorded yet for this session; returns how many were added."""
+    """Append the uses not recorded yet for this session; returns how many were added. A use recorded
+    as ok that a later capture of the same session (resumed, then corrected) finds corrected is
+    recorded again as corrected; read_uses keeps the last record per key."""
     path = _runs_file(data)
     path.parent.mkdir(parents=True, exist_ok=True)
     with locked(path):
-        seen = {r.get("key") for r in read_uses(data) if r.get("session") == session}
+        seen = {r.get("key"): r for r in read_uses(data) if r.get("session") == session}
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         new = []
         for u in uses:
             k = _key(session, u)
-            if k not in seen:
-                seen.add(k)
-                new.append({"skill": u["skill"], "tool": tool, "project": project, "session": session,
-                            "key": k, "outcome": u["outcome"], "at": now})
+            old = seen.get(k)
+            if old is None or (old.get("outcome") == "ok" and u["outcome"] == "corrected"):
+                row = {"skill": u["skill"], "tool": tool, "project": project, "session": session,
+                       "key": k, "outcome": u["outcome"], "at": old.get("at", now) if old else now}
+                seen[k] = row
+                new.append(row)
         if new:
             with open(path, "a") as fh:
                 for r in new:
@@ -70,15 +74,16 @@ def read_uses(data, days: int | None = None, today: date | None = None) -> list[
     if not path.exists():
         return []
     cutoff = ((today or date.today()) - timedelta(days=days)).isoformat() if days else ""
-    out = []
-    for line in path.read_text().splitlines():
+    out: dict = {}
+    for n, line in enumerate(path.read_text().splitlines()):
         try:
             r = json.loads(line)
         except ValueError:
             continue
         if isinstance(r, dict) and r.get("skill") and r.get("at", "")[:10] >= cutoff:
-            out.append(r)
-    return out
+            out.pop(r.get("key") or n, None)  # the last record of a use wins, in its latest position
+            out[r.get("key") or n] = r
+    return list(out.values())
 
 
 # -- health ------------------------------------------------------------------------

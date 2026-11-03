@@ -206,6 +206,8 @@ def evaluate(scenario: Scenario, calls: list[dict]) -> list[dict]:
 
 
 # -- running (spec §3.2) --------------------------------------------------------------
+REPLY_MAX = 1500  # the agent's final reply per turn, kept in the report to see why a check failed
+
 def _sh(argv, cwd, env, what: str) -> None:
     r = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
@@ -235,8 +237,8 @@ def _setup(aos, scenario: Scenario, tmp: Path, env: dict) -> list[Path]:
 def run_scenario(aos, scenario: Scenario, claude_cmd: list[str] | None = None, keep: bool = False) -> dict:
     """One scenario in a throwaway AOS_HOME, with workers never launched (AOS_DRY_DISPATCH=1)."""
     from .sessions import claude_project_folder
-    out = {"scenario": scenario.name, "ok": False, "checks": [], "calls": [], "cost_usd": 0.0, "seconds": 0.0,
-           "error": None, "kept": None}
+    out = {"scenario": scenario.name, "ok": False, "checks": [], "calls": [], "replies": [], "cost_usd": 0.0,
+           "seconds": 0.0, "error": None, "kept": None}
     cmd = list(claude_cmd or ["claude"])
     if not shutil.which(cmd[0]):
         out["error"] = f"claude CLI not found ({cmd[0]}); install Claude Code to run skill tests"
@@ -254,7 +256,8 @@ def run_scenario(aos, scenario: Scenario, claude_cmd: list[str] | None = None, k
         session = None
         for turn in scenario.turns:
             argv = [*cmd, "-p", turn, "--output-format", "stream-json", "--verbose",
-                    "--permission-mode", "acceptEdits", *(["--model", model] if model else []),
+                    "--permission-mode", "acceptEdits", "--allowedTools", "mcp__aos",  # headless: no prompt to allow them
+                    *(["--model", model] if model else []),
                     *(["--resume", session] if session else [])]
             left = deadline - time.monotonic()
             if left <= 0:
@@ -272,6 +275,7 @@ def run_scenario(aos, scenario: Scenario, claude_cmd: list[str] | None = None, k
                     session = ev.get("session_id") or session
                     if ev.get("type") == "result":
                         out["cost_usd"] += float(ev.get("total_cost_usd") or 0)
+                        out["replies"].append(str(ev.get("result") or "")[:REPLY_MAX])
             if r.returncode != 0:
                 out["error"] = f"claude exited {r.returncode}: {(r.stderr or '').strip()[-300:]}"
                 break
@@ -306,6 +310,8 @@ def _report(skill: str, results: list[dict], errors: list[str]) -> str:
             lines += ["", f"**Error:** {r['error']}"]
         lines += [""] + [f"- {'✓' if c['ok'] else '✗'} `{c['check']}`: {c['why']}" for c in r["checks"]]
         lines += ["", "Tool calls:", ""] + [f"{i}. {c['name']}" for i, c in enumerate(r["calls"], 1)]
+        for i, reply in enumerate(r.get("replies") or [], 1):
+            lines += ["", f"Reply to turn {i}:", "", *[f"> {l}" for l in reply.splitlines() or [""]]]
     return "\n".join(lines) + "\n"
 
 

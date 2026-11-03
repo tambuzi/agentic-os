@@ -54,11 +54,13 @@ def test_run_scenario_passes_and_writes_the_report_and_results(env):
     text = report.read_text()
     assert report.parent == data / "skills" / "tests" and report.name.startswith("aos-feature-")
     assert "plan-two-projects: passed" in text and "task_create" in text and "$0.15" in text
+    assert "Board started for currency" in text                                  # what the agent replied
     [row] = [json.loads(l) for l in (data / "skills" / "tests" / "results.jsonl").read_text().splitlines()]
     assert (row["skill"], row["passed"], row["total"]) == ("aos-feature", 1, 1)
     first, second = calls_log(tmp_path)
     assert "--resume" not in first["argv"] and second["argv"][second["argv"].index("--resume") + 1] == "sess-1"
     assert {"stream-json", "--verbose", "acceptEdits"} <= set(first["argv"])
+    assert first["argv"][first["argv"].index("--allowedTools") + 1] == "mcp__aos"   # aos tools not refused
     assert Path(first["cwd"]).name == "api" and first["AOS_DRY_DISPATCH"] == "1"
 
 
