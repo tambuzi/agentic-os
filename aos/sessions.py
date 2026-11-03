@@ -339,8 +339,15 @@ def capture(home, data, settings: dict, tool: str, transcript, session: str | No
         if tool != "claude":
             return f"{tool} capture not available yet"
         turns = read_claude_transcript(transcript)
+        found = find_corrections(turns)
+        if (settings.get("skills") or {}).get("health", True):
+            try:  # skill health: every session's skill uses, corrected or not (no text stored)
+                from .skill_health import record_uses, skill_uses
+                record_uses(data, tool, slug, session or Path(transcript).stem, skill_uses(turns, found))
+            except Exception as e:
+                _log(data, f"skill uses not recorded: {type(e).__name__}: {e}")
         hits, keys = [], set()
-        for h in find_corrections(turns):
+        for h in found:
             key = hit_key(turns[h.index], h.kind)
             if key not in keys:
                 keys.add(key)
