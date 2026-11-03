@@ -312,6 +312,10 @@ class BoardTools:
         self.board.feature(feature)
         if not self.board.tasks(feature=feature):
             raise AosError(f"feature {feature!r} has no tasks", "create tasks with task_create first")
+        if os.environ.get("AOS_DRY_DISPATCH") == "1":  # skill compliance tests: record it, launch nothing
+            for t in self.board.tasks(feature=feature):
+                self.board.log_event(t["id"], "dispatch", "would start the dispatcher (AOS_DRY_DISPATCH=1)")
+            return {"started": False, "dry_run": True, "message": "would start the dispatcher"}
         st = dispatcher_status(self.board.data)
         if st["running"]:
             if st.get("feature") in (None, feature):

@@ -46,3 +46,9 @@ jobs:
 
       - name: Test
         run: python -m pytest -q
+
+      - name: Validate skill test files (no AI calls)
+        env:
+          AOS_HOME: ${{ runner.temp }}/aos-home
+          AOS_REPO: ${{ github.workspace }}
+        run: python -m aos skills test --validate

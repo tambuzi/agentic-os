@@ -8,7 +8,14 @@ evaluates each check against them. No AI judges anything here.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -195,3 +202,128 @@ def evaluate(scenario: Scenario, calls: list[dict]) -> list[dict]:
         ok, why = _one(c, calls)
         out.append({"check": _label(c), "ok": ok, "why": why})
     return out
+
+
+# -- running (spec §3.2) --------------------------------------------------------------
+def _sh(argv, cwd, env, what: str) -> None:
+    r = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        raise AosError(f"setup failed ({what}): {(r.stderr or r.stdout).strip()[-300:]}")
+
+
+def _setup(aos, scenario: Scenario, tmp: Path, env: dict) -> list[Path]:
+    aos_cmd = [sys.executable, "-m", "aos"]
+    _sh([*aos_cmd, "init", str(aos.repo), "--worker", "claude"], tmp, env, "aos init")
+    acp = Path(aos.home) / "acp"
+    if acp.exists():  # the Claude ACP adapter, installed once per machine
+        (tmp / "home" / "acp").symlink_to(acp.resolve())
+    git = ["git", "-c", "user.name=aos skill test", "-c", "user.email=aos@localhost"]
+    paths = []
+    for name in scenario.projects:
+        p = tmp / "projects" / name
+        p.mkdir(parents=True)
+        (p / "README.md").write_text(f"# {name}\n\nA demo project for the {scenario.skill} skill test.\n")
+        _sh(["git", "init", "-q", "-b", "main"], p, env, f"git init {name}")
+        _sh([*git, "add", "."], p, env, f"git add {name}")
+        _sh([*git, "commit", "-qm", "init"], p, env, f"git commit {name}")
+        _sh([*aos_cmd, "link", str(p), "--no-graphskill", "--targets", "claude"], tmp, env, f"aos link {name}")
+        paths.append(p)
+    return paths
+
+
+def run_scenario(aos, scenario: Scenario, claude_cmd: list[str] | None = None, keep: bool = False) -> dict:
+    """One scenario in a throwaway AOS_HOME, with workers never launched (AOS_DRY_DISPATCH=1)."""
+    from .sessions import claude_project_folder
+    out = {"scenario": scenario.name, "ok": False, "checks": [], "calls": [], "cost_usd": 0.0, "seconds": 0.0,
+           "error": None, "kept": None}
+    cmd = list(claude_cmd or ["claude"])
+    if not shutil.which(cmd[0]):
+        out["error"] = f"claude CLI not found ({cmd[0]}); install Claude Code to run skill tests"
+        return out
+    start = time.monotonic()
+    tmp = Path(tempfile.mkdtemp(prefix="aos-skilltest-", dir=Path.home()))
+    env = {k: v for k, v in os.environ.items() if k != "AOS_REPO"}
+    env.update(AOS_HOME=str(tmp / "home"), AOS_DRY_DISPATCH="1")
+    folders: list[str] = []
+    try:
+        projects = _setup(aos, scenario, tmp, env)
+        folders = [claude_project_folder(p) for p in projects]
+        model = ((aos.settings.get("workers") or {}).get("claude") or {}).get("model")
+        deadline = start + 60 * scenario.timeout_min
+        session = None
+        for turn in scenario.turns:
+            argv = [*cmd, "-p", turn, "--output-format", "stream-json", "--verbose",
+                    "--permission-mode", "acceptEdits", *(["--model", model] if model else []),
+                    *(["--resume", session] if session else [])]
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise subprocess.TimeoutExpired(argv, 0)
+            r = subprocess.run(argv, cwd=projects[0], env=env, capture_output=True, text=True, timeout=left,
+                               stdin=subprocess.DEVNULL)
+            lines = r.stdout.splitlines()
+            out["calls"] += tool_calls_from_stream(lines)
+            for line in lines:
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(ev, dict):
+                    session = ev.get("session_id") or session
+                    if ev.get("type") == "result":
+                        out["cost_usd"] += float(ev.get("total_cost_usd") or 0)
+            if r.returncode != 0:
+                out["error"] = f"claude exited {r.returncode}: {(r.stderr or '').strip()[-300:]}"
+                break
+    except subprocess.TimeoutExpired:
+        out["error"] = f"timed out after {scenario.timeout_min:g} min"
+    except Exception as e:  # a crashed scenario fails; the others still run
+        out["error"] = e.message if isinstance(e, AosError) else f"{type(e).__name__}: {e}"
+    finally:
+        if keep:
+            out["kept"] = str(tmp)
+        else:
+            shutil.rmtree(tmp, ignore_errors=True)
+            for f in folders:
+                shutil.rmtree(Path.home() / ".claude" / "projects" / f, ignore_errors=True)
+    out["seconds"] = round(time.monotonic() - start, 1)
+    out["checks"] = evaluate(scenario, out["calls"])
+    out["ok"] = out["error"] is None and all(c["ok"] for c in out["checks"])
+    return out
+
+
+def _report(skill: str, results: list[dict], errors: list[str]) -> str:
+    passed = sum(r["ok"] for r in results)
+    lines = [f"# Skill tests: {skill}", "",
+             f"{passed} of {len(results)} scenarios passed, "
+             f"${sum(r['cost_usd'] for r in results):.2f}, {sum(r['seconds'] for r in results):.0f}s", ""]
+    for e in errors:
+        lines += [f"- test file error: {e}"]
+    for r in results:
+        lines += ["", f"## {r['scenario']}: {'passed' if r['ok'] else 'failed'}", "",
+                  f"${r['cost_usd']:.2f}, {r['seconds']:.0f}s" + (f", kept at {r['kept']}" if r["kept"] else "")]
+        if r["error"]:
+            lines += ["", f"**Error:** {r['error']}"]
+        lines += [""] + [f"- {'✓' if c['ok'] else '✗'} `{c['check']}`: {c['why']}" for c in r["checks"]]
+        lines += ["", "Tool calls:", ""] + [f"{i}. {c['name']}" for i, c in enumerate(r["calls"], 1)]
+    return "\n".join(lines) + "\n"
+
+
+def run_skill(aos, skill: str, scenario_name: str | None = None, claude_cmd: list[str] | None = None,
+              keep: bool = False) -> tuple[bool, Path]:
+    scenarios, errors = discover(aos.repo, skill)
+    if scenario_name:
+        scenarios = [s for s in scenarios if s.name == scenario_name or s.path.stem == scenario_name]
+    if not scenarios and not errors:
+        raise AosError(f"no tests for skill {skill!r}" + (f" named {scenario_name!r}" if scenario_name else ""),
+                       f"add skills/{skill}/tests/<scenario>.yaml, or draft one with --draft")
+    results = [run_scenario(aos, s, claude_cmd, keep) for s in scenarios]
+    out_dir = Path(aos.data) / "skills" / "tests"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    report = out_dir / f"{skill}-{now.strftime('%Y-%m-%d-%H%M%S')}.md"
+    report.write_text(_report(skill, results, errors))
+    total = len(results) + len(errors)
+    with open(out_dir / "results.jsonl", "a") as fh:
+        fh.write(json.dumps({"skill": skill, "passed": sum(r["ok"] for r in results), "total": total,
+                             "at": now.isoformat(timespec="seconds")}) + "\n")
+    return (not errors and all(r["ok"] for r in results)), report
