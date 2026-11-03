@@ -108,11 +108,18 @@ class AOS:
         if promoted:
             from .lessons import settle_promotion
             settle_promotion(self.data, promoted, applied=True)
+        if p.get("source") == "skill-health":
+            from .skill_health import settle
+            settle(self.data, pid, "applied")
         return {**res, "applied": True}
 
     def reject_proposal(self, pid: str) -> None:
-        promoted = (inbox.load(self.data, pid).get("args") or {}).get("lessons")
+        p = inbox.load(self.data, pid)
+        promoted = (p.get("args") or {}).get("lessons")
         inbox.discard(self.data, pid)
+        if p.get("source") == "skill-health":
+            from .skill_health import settle
+            settle(self.data, pid, "rejected")
         if promoted:
             from .lessons import settle_promotion
             settle_promotion(self.data, promoted, applied=False)

@@ -663,6 +663,48 @@ class LearnerTools:
         return {"ok": True}
 
 
+class SkillImproverTools:
+    """A skill improver run's tools: read one skill and its corrections, propose one edit."""
+
+    def __init__(self, aos: AOS, name: str):
+        self.aos, self.name, self.done = aos, name, False
+
+    def skill_input(self) -> dict:
+        from .skill_health import improver_input
+        return {**improver_input(self.aos, self.name), "note": QUOTE_NOTE.replace("from the board", "from user sessions")}
+
+    def propose_skill_patch(self, old: str, new: str, reason: str) -> dict:
+        from .skill_health import propose
+        if self.done:
+            return {"ok": False, "error": "one proposal per run; it is already staged"}
+        try:
+            pid = propose(self.aos, self.name, old, new, reason)
+        except AosError as e:
+            return {"ok": False, "error": e.message}
+        self.done = True
+        return {"ok": True, "proposal": pid}
+
+
+def build_improver_server(st: SkillImproverTools):
+    try:
+        from mcp.server.mcpserver import MCPServer as Server
+    except ImportError:
+        from mcp.server.fastmcp import FastMCP as Server
+    mcp = Server("aos")
+
+    @mcp.tool()
+    def skill_input() -> dict:
+        """The skill's current text and quoted excerpts of the corrections users made after agents used it. Call first."""
+        return st.skill_input()
+
+    @mcp.tool()
+    def propose_skill_patch(old: str, new: str, reason: str) -> dict:
+        """Propose ONE focused edit: `old` must occur exactly once in the skill; `new` replaces it (≤ 2000 characters). The user approves it in the inbox."""
+        return st.propose_skill_patch(old, new, reason)
+
+    return mcp
+
+
 def build_learner_server(lt: LearnerTools):
     """Only the learner tools: no memory, skills, code or board writes."""
     try:
@@ -946,7 +988,8 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
 
 
 def run_server(project: str | Path, task: int | None = None, attempt: int | None = None,
-               review: bool = False, learn: bool = False, learn_session: str | None = None) -> None:
+               review: bool = False, learn: bool = False, learn_session: str | None = None,
+               improve_skill: str | None = None) -> None:
     from .link import sync
 
     cfg = load_user_config()
@@ -962,7 +1005,9 @@ def run_server(project: str | Path, task: int | None = None, attempt: int | None
     cwd = os.getcwd()
     os.chdir(Path.home())  # FastMCP reads .env from cwd; keep project env files out of it
     try:
-        if learn or learn_session:
+        if improve_skill:
+            mcp = build_improver_server(SkillImproverTools(aos, improve_skill))
+        elif learn or learn_session:
             board = Board(aos.data, aos.settings["board"]["max_tasks_per_feature"])
             max_ops = int((aos.settings.get("learning") or {}).get("max_ops_per_run", 3))
             if learn_session:

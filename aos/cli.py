@@ -105,7 +105,8 @@ def cmd_serve(a) -> int:
     from .mcp_server import run_server
     if a.learn and (a.review or a.task is None):
         raise AosError("--learn needs --task and cannot be combined with --review")
-    run_server(a.project, a.task, a.attempt, a.review, learn=a.learn, learn_session=a.learn_session)
+    run_server(a.project, a.task, a.attempt, a.review, learn=a.learn, learn_session=a.learn_session,
+               improve_skill=a.improve_skill)
     return 0
 
 
@@ -301,6 +302,7 @@ def _lessons_sessions(aos: AOS, a, words: list[str]) -> int:
     if words[0] == "learn-sessions":
         results = session_learner.learn_pending(aos)
         print("\n".join(results) if results else "nothing pending")
+        _improve_flagged(aos)
         return 0
     if a.last:
         print(session_learner.learn_last(aos, a.project_dir or ".", a.tool or "claude"))
@@ -310,7 +312,17 @@ def _lessons_sessions(aos: AOS, a, words: list[str]) -> int:
     print(session_learner.learn_entry(aos, words[1]))
     for r in session_learner.learn_pending(aos, limit=3):  # the next job retries what waited or failed
         print(r)
+    _improve_flagged(aos)
     return 0
+
+
+def _improve_flagged(aos: AOS) -> None:
+    from . import skill_health
+    try:
+        for r in skill_health.improve_flagged(aos):
+            print(f"skill improver: {r}")
+    except Exception as e:  # never fail the background job over it
+        print(f"skill improver: failed: {e}")
 
 
 def _lessons_capture(a) -> int:
@@ -659,6 +671,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--review", action="store_true", help="board reviewer mode: review_pass / review_fail only")
     s.add_argument("--learn", action="store_true", help="board learner mode: lesson tools only")
     s.add_argument("--learn-session", help="session learner mode for this queue entry: lesson tools only")
+    s.add_argument("--improve-skill", help="skill improver mode for this skill: skill_input / propose_skill_patch only")
     s.set_defaults(fn=cmd_serve)
 
     s = sub.add_parser("inbox", help="review staged memory/skill proposals")
