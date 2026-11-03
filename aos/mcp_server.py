@@ -689,6 +689,39 @@ class SkillImproverTools:
         return {"ok": True, "proposal": pid}
 
 
+class SkillDraftTools:
+    """A test drafter run's one tool: save a validated draft test file for one skill."""
+
+    def __init__(self, aos: AOS, name: str):
+        self.aos, self.name, self.done = aos, name, False
+
+    def write_test(self, yaml_text: str) -> dict:
+        from .skill_tests import write_draft
+        if self.done:
+            return {"ok": False, "error": "one draft per run; it is already saved"}
+        try:
+            path = write_draft(self.aos.repo, self.name, yaml_text)
+        except AosError as e:
+            return {"ok": False, "error": e.message}
+        self.done = True
+        return {"ok": True, "path": str(path)}
+
+
+def build_drafter_server(dt: SkillDraftTools):
+    try:
+        from mcp.server.mcpserver import MCPServer as Server
+    except ImportError:
+        from mcp.server.fastmcp import FastMCP as Server
+    mcp = Server("aos")
+
+    @mcp.tool()
+    def write_test(yaml_text: str) -> dict:
+        """Save the drafted test file (YAML, the drafter protocol's format). Errors say what to fix."""
+        return dt.write_test(yaml_text)
+
+    return mcp
+
+
 def build_improver_server(st: SkillImproverTools):
     try:
         from mcp.server.mcpserver import MCPServer as Server
@@ -993,7 +1026,7 @@ def _register_board_tools(mcp, bt: BoardTools) -> None:
 
 def run_server(project: str | Path, task: int | None = None, attempt: int | None = None,
                review: bool = False, learn: bool = False, learn_session: str | None = None,
-               improve_skill: str | None = None) -> None:
+               improve_skill: str | None = None, draft_skill: str | None = None) -> None:
     from .link import sync
 
     cfg = load_user_config()
@@ -1009,7 +1042,9 @@ def run_server(project: str | Path, task: int | None = None, attempt: int | None
     cwd = os.getcwd()
     os.chdir(Path.home())  # FastMCP reads .env from cwd; keep project env files out of it
     try:
-        if improve_skill:
+        if draft_skill:
+            mcp = build_drafter_server(SkillDraftTools(aos, draft_skill))
+        elif improve_skill:
             mcp = build_improver_server(SkillImproverTools(aos, improve_skill))
         elif learn or learn_session:
             board = Board(aos.data, aos.settings["board"]["max_tasks_per_feature"])

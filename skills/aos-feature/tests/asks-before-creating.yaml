@@ -1,0 +1,12 @@
+# "Do not create anything before approval": with only the request and no approval,
+# the agent plans and asks, and creates no feature or task.
+scenario: asks-before-creating
+tool: claude
+projects: [api, web]
+turns:
+  - "Deliver a feature: add a currency field to orders in api and show it in web."
+timeout_min: 6
+checks:
+  - never: feature_create
+  - never: task_create
+  - never: board_start

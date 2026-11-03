@@ -58,6 +58,8 @@ def mode():
         return "review_" + os.environ.get("FAKE_ACP_REVIEW", "pass")
     if state["role"] == "learner":
         return "learn_" + os.environ.get("FAKE_ACP_LEARN", "new")
+    if state["role"] == "drafter":
+        return "draft_" + os.environ.get("FAKE_ACP_DRAFT", "valid")
     if state["role"] == "improver":
         return "improve_" + os.environ.get("FAKE_ACP_IMPROVE", "nothing")
     return os.environ.get(f"FAKE_ACP_MODE_{t}", os.environ.get("FAKE_ACP_MODE", "echo"))
@@ -174,6 +176,14 @@ def run_prompt(rid, sid, text):
         line = next(l for l in text.splitlines() if l.strip() and text.count(l) == 1 and not l.startswith(("---", "name", "description")))
         st.propose_skill_patch(line, line + " (clarified by the fake improver)", "users kept correcting this step")
         finish_turn(rid, sid)
+    elif m in ("draft_valid", "draft_invalid"):
+        from aos.config import repo_root
+        from aos.core import AOS
+        from aos.mcp_server import SkillDraftTools
+        dt = SkillDraftTools(AOS(repo_root()), state["draft_skill"])
+        check = "never: task_create" if m == "draft_valid" else "sometimes: task_create"
+        dt.write_test(f"scenario: asks first\nturns: [Deliver a feature.]\nchecks: [{{{check}}}]\n")
+        finish_turn(rid, sid)
     elif m == "improve_nothing":
         finish_turn(rid, sid)
     elif m == "learn_nothing":
@@ -219,6 +229,9 @@ def handle(msg):
                          "learner" if "--learn" in args or "--learn-session" in args else "worker")
         if "--learn-session" in args:
             state["session_entry"] = args[args.index("--learn-session") + 1]
+        if "--draft-skill" in args:
+            state["role"] = "drafter"
+            state["draft_skill"] = args[args.index("--draft-skill") + 1]
         if "--improve-skill" in args:
             state["role"] = "improver"
             state["improve_skill"] = args[args.index("--improve-skill") + 1]

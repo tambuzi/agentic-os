@@ -256,8 +256,9 @@ def propose(aos, name: str, old: str, new: str, reason: str) -> str:
     return pid
 
 
-def improve(aos, name: str) -> str:
-    """One short improver run for a flagged skill. Returns "proposed <id>", "no change" or "failed: …"."""
+def tool_run(aos, label: str, protocol: str, prompt: str, serve_args: list[str]) -> str | None:
+    """One short AI run with only the aos tools `serve_args` exposes (the session learner machinery:
+    ACP with the learning model, CLI fallback, the daily budget). Returns the problem, or None."""
     from . import session_learner
     from .acp.tools import AdapterMissing
     from .workers.common import RunSpec, profile_settings, resolve_tool
@@ -265,33 +266,42 @@ def improve(aos, name: str) -> str:
     budget = learning.get("sessions_daily_budget_usd")
     if budget is not None and session_learner.spent_today(aos.data) >= float(budget):
         return "deferred: daily budget reached"
-    before = {r["proposal"] for r in _proposals(aos.data)}
     tool = resolve_tool(aos, "")[0]
     settings = profile_settings(aos, tool, "")
     settings = {**settings, "allowed_tools": ["mcp:aos"], "model": settings.get("learning_model") or settings.get("model")}
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    run_dir = Path(aos.data) / "runs" / f"improve-{name}-{stamp}"
+    run_dir = Path(aos.data) / "runs" / f"{label}-{stamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
     context = run_dir / "context.md"
-    context.write_text("## Skill improver protocol\n\n" + IMPROVER_PROTOCOL + "\n")
+    context.write_text(protocol + "\n")
     cmd = session_learner._aos_command()
-    servers = {"aos": {"command": cmd[0], "args": [*cmd[1:], "serve", "--project", str(aos.repo), "--improve-skill", name]}}
-    spec = RunSpec(task={"id": 0, "feature": "skills", "project": "skills", "title": f"improve {name}", "spec": "",
+    servers = {"aos": {"command": cmd[0], "args": [*cmd[1:], "serve", "--project", str(aos.repo), *serve_args]}}
+    spec = RunSpec(task={"id": 0, "feature": "skills", "project": "skills", "title": label, "spec": "",
                          "worker": tool},
                    project_path=Path(aos.repo), worktree=run_dir, run_dir=run_dir, context_file=context,
-                   prompt=f"Improve the skill {name}. Follow the skill improver protocol.", mcp_servers=servers,
-                   allowed=["mcp:aos"], model=settings.get("model"), resume=False, session_id=None, role="learner")
-    log = Path(aos.data) / "logs" / f"improve-{name}.log"
+                   prompt=prompt, mcp_servers=servers, allowed=["mcp:aos"], model=settings.get("model"),
+                   resume=False, session_id=None, role="learner")
+    log = Path(aos.data) / "logs" / f"{label}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     timeout = 60 * float(learning.get("learner_timeout_min", 5))
     try:
         cost, unit, problem = session_learner._run_acp(aos, tool, settings, spec, log, timeout)
-        session_learner._record_cost(aos.data, f"improve-{name}", cost, unit)
+        session_learner._record_cost(aos.data, label, cost, unit)
     except AdapterMissing:
         problem = session_learner._run_cli(aos, settings, spec, log, timeout)
+    return problem
+
+
+def improve(aos, name: str) -> str:
+    """One short improver run for a flagged skill. Returns "proposed <id>", "no change" or "failed: …"."""
+    before = {r["proposal"] for r in _proposals(aos.data)}
+    problem = tool_run(aos, f"improve-{name}", "## Skill improver protocol\n\n" + IMPROVER_PROTOCOL,
+                       f"Improve the skill {name}. Follow the skill improver protocol.", ["--improve-skill", name])
     new = [r["proposal"] for r in _proposals(aos.data) if r["proposal"] not in before]
     if new:
         return f"proposed {new[0]}"
+    if problem and problem.startswith("deferred"):
+        return problem
     return f"failed: {problem}" if problem else "no change"
 
 

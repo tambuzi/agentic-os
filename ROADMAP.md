@@ -126,18 +126,18 @@ Let workers in the same feature talk directly, on top of ACP live delivery. Toda
 ## 4. Recall and skill health
 
 - [ ] Session search: full-text search over past Claude Code (and Kiro) sessions, through a `session_search` tool.
-- [ ] **Skill runs and health** (ECC `skill-evolution`):
-  - record each `aos-*` skill run and its outcome;
-  - success rate over 7 and 30 days with a trend;
-  - a version history and change log per skill.
+- [x] **Skill runs and health** (ECC `skill-evolution`, 0.13.0):
+  - record each skill use and its outcome (corrected or not) from your sessions;
+  - corrected rate over 7 and 30 days with a trend; flagged skills get a fix proposal in the inbox;
+  - a version history and change log per skill: git history of `skills/` for now.
 - [ ] **Skill stock-take:**
   - each skill gets a verdict (Keep, Improve, Update, Retire, or Merge into another) with a stated reason;
   - nothing changes until the user confirms;
   - this replaces the plain active → stale → archived curator.
-- [ ] **Skill compliance tests** (ECC `skill-comply`):
-  - scenarios that support, are neutral to, or compete with each `aos-*` skill;
-  - run headless through the board's ACP workers;
-  - tool-call traces scored against the skill's expected steps.
+- [x] **Skill compliance tests** (ECC `skill-comply`, 0.13.0):
+  - hand-written scenarios per skill (`skills/<name>/tests/`), AI drafts you review;
+  - run headless with `claude -p` in a throwaway home (Kiro runs later);
+  - tool-call traces checked with fixed rules against the skill's expected steps.
 
   Catches regressions like the planning skill not using separate workers, or not using graphskill.
 

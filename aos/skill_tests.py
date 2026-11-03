@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -327,3 +328,71 @@ def run_skill(aos, skill: str, scenario_name: str | None = None, claude_cmd: lis
         fh.write(json.dumps({"skill": skill, "passed": sum(r["ok"] for r in results), "total": total,
                              "at": now.isoformat(timespec="seconds")}) + "\n")
     return (not errors and all(r["ok"] for r in results)), report
+
+
+# -- drafts (spec §3.2 --draft) -----------------------------------------------------
+DRAFT_PROTOCOL = """\
+## Skill test drafter protocol
+
+Write ONE compliance test for the agenticOS skill below and save it with write_test(yaml_text).
+A test file is YAML:
+
+  scenario: <short-name>
+  tool: claude
+  projects: [api, web]           # throwaway demo projects
+  turns: ["<what the user says first>", "<what they say next>"]
+  timeout_min: 6
+  checks:                        # only these check types exist
+    - calls: <tool>              # at_least: n / at_most: n (default at_least: 1),
+      at_least: 1                #   distinct: <arg>, where: {arg: value}
+    - before: [<tool a>, <tool b>]   # first a comes before first b
+    - never: <tool>
+
+Tool names are the aos MCP tool names without the mcp__aos__ prefix (task_create, feature_create,
+board_start, code_query, ...) or plain Claude tools (Bash, Edit). Test what the skill says the
+agent must and must not do. If write_test returns an error, fix the file and call it again."""
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "scenario"
+
+
+def write_draft(repo, skill: str, yaml_text: str) -> Path:
+    """Validate a drafted test file and save it as skills/<skill>/tests/draft-<slug>.yaml."""
+    try:
+        doc = yaml.safe_load(yaml_text)
+    except yaml.YAMLError as e:
+        raise TestFileError(f"not valid yaml: {e}") from None
+    name = doc.get("scenario") if isinstance(doc, dict) else None
+    tests = Path(repo) / "skills" / skill / "tests"
+    tests.mkdir(parents=True, exist_ok=True)
+    tmp = tests / f".draft-{os.getpid()}.tmp"
+    tmp.write_text(yaml_text)
+    try:
+        load(tmp)
+        slug = _slug(str(name))
+        path, n = tests / f"draft-{slug}.yaml", 2
+        while path.exists():
+            path, n = tests / f"draft-{slug}-{n}.yaml", n + 1
+        tmp.rename(path)
+        return path
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def draft(aos, skill: str) -> Path:
+    """A cheap AI run drafts one test file for the skill; the user reviews and renames it to run it."""
+    from .skill_health import tool_run
+    md = Path(aos.repo) / "skills" / skill / "SKILL.md"
+    if not md.is_file():
+        raise AosError(f"no skill {skill!r} in this repo", "draft tests for skills under skills/")
+    tests = md.parent / "tests"
+    before = set(tests.glob("draft-*.yaml")) if tests.exists() else set()
+    problem = tool_run(aos, f"draft-{skill}", DRAFT_PROTOCOL + f"\n\n## The skill: {skill}\n\n" + md.read_text(),
+                       f"Draft one compliance test for the skill {skill}. Follow the drafter protocol.",
+                       ["--draft-skill", skill])
+    new = sorted(set(tests.glob("draft-*.yaml")) - before) if tests.exists() else []
+    if not new:
+        raise AosError(f"the drafter wrote no valid test file{f' ({problem})' if problem else ''}",
+                       f"see {Path(aos.data) / 'logs' / f'draft-{skill}.log'}")
+    return new[0]

@@ -4,7 +4,20 @@ All notable changes to agenticOS. Format: [Keep a Changelog](https://keepachange
 
 Releases before 0.7.0 were numbered after the fact, one per merged pull request, and are not tagged yet.
 
-## [0.12.0] — unreleased (`feat/session-learning`)
+## [0.13.0] — unreleased (`feat/skill-health`)
+
+### Added
+- **Skill health.** The end-of-session capture also records every skill use (Claude Code `Skill` tool calls) and whether you corrected the agent soon after (before the next skill use, within 15 turns), in `<data>/skills/runs.jsonl`. No transcript text, no AI, no cost.
+  - `aos skills health [--days 30]`: uses and corrected rate over 7 and 30 days, trend, last use, last test pass rate, flagged. `aos doctor` lists flagged skills.
+  - Flagged: at least `skills.flag_min_corrected` (3) corrected uses and a corrected rate of at least `skills.flag_rate` (0.4) over 30 days.
+- **Fix proposals.** For a flagged repo skill, the background job runs a short skill improver (`aos serve --improve-skill`, tools `skill_input` and `propose_skill_patch`, learning model, session-learning budget). It stages one inbox `skill` patch with its evidence; `aos inbox apply` writes it through the skill writer. One open proposal per skill, and `skills.proposal_cooldown_days` (14) between proposals.
+- **Skill compliance tests.** Scenario files in `skills/<name>/tests/*.yaml` with fixed checks (`calls` with `at_least`/`at_most`/`distinct`/`where`, `before`, `never`).
+  - `aos skills test [skill] [scenario] [--keep]` runs them with `claude -p --output-format stream-json` in a throwaway aos home and throwaway projects; reports go to `<data>/skills/tests/`.
+  - `AOS_DRY_DISPATCH=1` (set by the runner) makes `board_start` and `aos board run` record "would start the dispatcher" without launching workers.
+  - `--draft` has a cheap AI run write `draft-<name>.yaml` (validated; drafts never run until renamed). `--validate` checks every file at no cost; CI runs it.
+  - First tests: `aos-feature/tests/plan-two-projects.yaml` and `asks-before-creating.yaml`.
+
+## [0.12.0] — 2026-10-30 (PR #16)
 
 ### Added
 - **Learning from your own sessions.** When a Claude Code session in a linked project ends, its end-of-session hook (`aos link` installs it) checks the transcript with fixed rules. The rules look for your corrections ("no / don't / instead / actually …", also in Spanish), refused tool calls, and the agent fixing its own failed command.

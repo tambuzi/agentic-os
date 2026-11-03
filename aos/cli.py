@@ -106,7 +106,7 @@ def cmd_serve(a) -> int:
     if a.learn and (a.review or a.task is None):
         raise AosError("--learn needs --task and cannot be combined with --review")
     run_server(a.project, a.task, a.attempt, a.review, learn=a.learn, learn_session=a.learn_session,
-               improve_skill=a.improve_skill)
+               improve_skill=a.improve_skill, draft_skill=a.draft_skill)
     return 0
 
 
@@ -243,6 +243,12 @@ def cmd_skills(a) -> int:
         return 0
     if a.action == "test":
         from . import skill_tests
+        if a.draft:
+            if not a.skill:
+                raise AosError("usage: aos skills test <skill> --draft")
+            path = skill_tests.draft(aos, a.skill)
+            print(f"drafted {path}\nreview it, then rename it without draft- to run it")
+            return 0
         if a.validate:
             ok, errors = skill_tests.discover(aos.repo, a.skill, include_drafts=True)
             for e in errors:
@@ -692,6 +698,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--learn", action="store_true", help="board learner mode: lesson tools only")
     s.add_argument("--learn-session", help="session learner mode for this queue entry: lesson tools only")
     s.add_argument("--improve-skill", help="skill improver mode for this skill: skill_input / propose_skill_patch only")
+    s.add_argument("--draft-skill", help="test drafter mode for this skill: write_test only")
     s.set_defaults(fn=cmd_serve)
 
     s = sub.add_parser("inbox", help="review staged memory/skill proposals")
@@ -791,6 +798,7 @@ def _parser() -> argparse.ArgumentParser:
     t.add_argument("scenario", nargs="?")
     t.add_argument("--keep", action="store_true", help="keep the throwaway home and demo projects")
     t.add_argument("--validate", action="store_true", help="only check the test files; no AI calls")
+    t.add_argument("--draft", action="store_true", help="have a cheap AI run draft a test file to review")
     s.set_defaults(fn=cmd_skills)
 
     s = sub.add_parser("lessons", help="lessons learned from board corrections: list [project] [--all], "
