@@ -147,7 +147,7 @@ def flagged(data, settings: dict, repo, today: date | None = None) -> list[str]:
 
 
 # -- the skill improver (spec §2.3) --------------------------------------------------
-PATCH_MAX, REASON_MAX, MAX_SESSIONS = 2000, 500, 5
+PATCH_MAX, REASON_MAX, MAX_SESSIONS, MAX_FAILED_RUNS = 2000, 500, 5, 3
 IMPROVER_PROTOCOL = """\
 You are improving one agenticOS skill that users keep having to correct. Call skill_input: it
 gives the skill's current text and quoted excerpts of what users said right after agents used
@@ -197,12 +197,19 @@ def eligible(aos, name: str, today: date | None = None) -> bool:
         return False  # plugin skills are reported, never patched
     if name not in flagged(aos.data, aos.settings, aos.repo, today):
         return False
-    latest: dict[str, dict] = {}
-    for row in _proposals(aos.data):
-        if row.get("skill") == name:
-            latest[row["proposal"]] = row
     cooldown = int((aos.settings.get("skills") or {}).get("proposal_cooldown_days", 14))
     cutoff = ((today or date.today()) - timedelta(days=cooldown)).isoformat()
+    latest: dict[str, dict] = {}
+    failed = 0  # recent improver runs that failed since the last proposal (spec §4: retried up to 3 times)
+    for row in _proposals(aos.data):
+        if row.get("skill") != name:
+            continue
+        if row.get("status") == "failed":
+            failed += row.get("at", "")[:10] >= cutoff
+        else:
+            latest[row["proposal"]], failed = row, 0
+    if failed >= MAX_FAILED_RUNS:
+        return False  # tried again once the failures are older than the cooldown
     from . import inbox
     for row in latest.values():
         if row.get("status") == "open":
@@ -294,6 +301,8 @@ def tool_run(aos, label: str, protocol: str, prompt: str, serve_args: list[str])
         session_learner._record_cost(aos.data, label, cost, unit)
     except AdapterMissing:
         problem = session_learner._run_cli(aos, settings, spec, log, timeout)
+    except Exception as e:  # the agent crashed or the connection broke: a failed run, with its reason
+        problem = f"{type(e).__name__}: {e}"
     return problem
 
 
@@ -307,7 +316,11 @@ def improve(aos, name: str) -> str:
         return f"proposed {new[0]}"
     if problem and problem.startswith("deferred"):
         return problem
-    return f"failed: {problem}" if problem else "no change"
+    if problem:
+        _log_proposal(aos.data, {"skill": name, "proposal": None, "status": "failed", "reason": problem[:300],
+                                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+        return f"failed: {problem}"
+    return "no change"
 
 
 def improve_flagged(aos, limit: int = 2) -> list[str]:

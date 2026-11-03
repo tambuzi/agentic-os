@@ -116,3 +116,16 @@ def test_improver_session_is_ignored_by_capture(env):
     t = write(tmp_path, [user("x"), say("y"), user("no, wrong")], "improver.jsonl")
     assert sessions.capture(aos.home, data, aos.settings, "claude", t, "imp", run_dir, launch=lambda e: None) \
         == "automated session"
+
+
+def test_a_failing_improver_is_retried_at_most_three_times(env):
+    aos, data, tmp_path, project = env
+    (aos.repo / "aos.yaml").write_text(yaml.safe_dump({
+        "learning": {"learner_timeout_min": 0.5},
+        "workers": {"claude": {"transport": "acp", "acp_command": [sys.executable, "-c", "import sys; sys.exit(3)"]}}}))
+    aos = AOS(aos.repo)
+    results = [skill_health.improve_flagged(aos) for _ in range(4)]
+    assert all(r and r[0].startswith("failed") for r in results[:3]), results
+    assert results[3] == [] and not skill_health.eligible(aos, "plan-it")
+    later = date.today() + timedelta(days=15)                                     # failures age out
+    assert skill_health.eligible(aos, "plan-it", today=later)                     # uses still within 30 days
