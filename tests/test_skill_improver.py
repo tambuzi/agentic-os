@@ -129,3 +129,53 @@ def test_a_failing_improver_is_retried_at_most_three_times(env):
     assert results[3] == [] and not skill_health.eligible(aos, "plan-it")
     later = date.today() + timedelta(days=15)                                     # failures age out
     assert skill_health.eligible(aos, "plan-it", today=later)                     # uses still within 30 days
+
+
+def test_no_change_starts_the_cooldown(env, monkeypatch):
+    aos, data, tmp_path, project = env
+    monkeypatch.setenv("FAKE_ACP_IMPROVE", "nothing")
+    assert skill_health.improve_flagged(aos) == ["no change"]
+    assert skill_health.improve_flagged(aos) == []                                # not again every session
+
+
+def test_no_evidence_skips_the_run(env):
+    import shutil
+    aos, data, tmp_path, project = env
+    shutil.rmtree(data / "sessions" / "queue")                                    # pruned after 7 days
+    [r] = skill_health.improve_flagged(aos)
+    assert r.startswith("no change") and "no corrections" in r
+    assert not (tmp_path / "agent.events").exists()                               # no AI run
+    assert skill_health.improve_flagged(aos) == []
+
+
+def test_one_improver_per_skill_at_a_time(env):
+    import fcntl
+    aos, data, tmp_path, project = env
+    lock = data / "skills" / "improve-plan-it.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)                                            # another job is running it
+        assert skill_health.improve_flagged(aos) == []
+
+
+def test_improver_excerpts_hold_no_tool_output(env):
+    aos, data, tmp_path, project = env
+    roles = {t["role"] for ex in skill_health.improver_input(aos, "plan-it")["corrections"] for t in ex["turns"]}
+    assert roles <= {"user", "assistant"} and "user" in roles
+
+
+def test_skill_writes_are_staged_during_skill_tests(env, monkeypatch):
+    aos, data, tmp_path, project = env
+    monkeypatch.setenv("AOS_SKILL_TEST", "1")
+    r = aos.skill_write("create", "made-in-a-test", {"content": "---\nname: made-in-a-test\ndescription: x\n---\nx\n"})
+    assert "staged" in r and not (aos.repo / "skills" / "made-in-a-test").exists()
+
+
+def test_skill_test_sessions_are_not_captured(env, monkeypatch):
+    aos, data, tmp_path, project = env
+    monkeypatch.setenv("AOS_SKILL_TEST", "1")
+    t = write(tmp_path, [user("x"), use("k", "Skill", skill="plan-it"), say("y"), user("no, wrong")], "st.jsonl")
+    before = len(skill_health.read_uses(data))
+    assert sessions.capture(aos.home, data, aos.settings, "claude", t, "st", project, launch=lambda e: None) \
+        == "skill test session"
+    assert len(skill_health.read_uses(data)) == before

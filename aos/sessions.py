@@ -323,6 +323,8 @@ def capture(home, data, settings: dict, tool: str, transcript, session: str | No
             launch=None) -> str:
     """Called by the end-of-session hook: find corrections and queue them. Fast, never raises."""
     try:
+        if os.environ.get("AOS_SKILL_TEST") == "1":
+            return "skill test session"  # `aos skills test` demo sessions teach nothing
         learning = settings.get("learning") or {}
         if not learning.get("enabled", True) or not learning.get("sessions", True):
             return "off"

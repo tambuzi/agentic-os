@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import yaml
@@ -80,7 +81,7 @@ class AOS:
                     reason: str = "", direct: bool = False) -> dict:
         _require(action, SKILL_OPS, args)
         skills.check_name(name)
-        if not direct and self.settings["skills"]["mode"] == "inbox":
+        if not direct and (self.settings["skills"]["mode"] == "inbox" or os.environ.get("AOS_SKILL_TEST") == "1"):
             pid = inbox.stage(self.data, "skill", action, {**args, "name": name}, source, reason)
             return {"staged": pid, "message": "skill change staged for team review"}
         if action == "create":

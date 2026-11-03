@@ -90,3 +90,20 @@ CALLS = skill_tests.tool_calls_from_stream(FIXTURE.read_text().splitlines())
 def test_each_check_pass_and_fail_with_reasons(check, ok, why):
     [r] = skill_tests.evaluate(scenario([check]), CALLS)
     assert r["ok"] is ok and why in r["why"], r
+
+
+def test_odd_files_never_crash_discovery(tmp_path):
+    put(tmp_path, "aos-feature", "plan-two-projects", GOOD)
+    put(tmp_path, "aos-feature", "int-key", "scenario: x\nturns: [hi]\nchecks:\n  - 1: task_create\n")
+    put(tmp_path, "aos-feature", "mixed-extra", "scenario: x\nturns: [hi]\nchecks:\n  - {never: x, 2: a, b: c}\n")
+    bad = tmp_path / "skills" / "aos-feature" / "tests" / "latin1.yaml"
+    bad.write_bytes(b"scenario: caf\xe9\n")
+    ok, errors = skill_tests.discover(tmp_path)
+    assert [s.name for s in ok] == ["plan-two-projects"] and len(errors) == 3
+    assert all("/skills/aos-feature/tests/" in e for e in errors)
+
+
+def test_check_names_are_prefix_stripped(tmp_path):
+    s = skill_tests.load(put(tmp_path, "aos-feature", "p", {**GOOD, "checks": [{"never": "mcp__aos__board_start"}]}))
+    [r] = skill_tests.evaluate(s, CALLS)
+    assert r["ok"] is False and "board_start called 1×" in r["why"]

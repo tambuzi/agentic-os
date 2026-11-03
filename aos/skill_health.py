@@ -6,6 +6,7 @@ transcript text): which skill, and whether the user corrected the agent soon aft
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 from datetime import date, datetime, timedelta, timezone
@@ -240,7 +241,10 @@ def improver_input(aos, name: str) -> dict:
         hits = sessions.find_corrections(turns)
         uses = [t for t in turns if t.role == "assistant" and t.tool == "Skill" and f'"skill":"{name}"' in (t.input or "")]
         mine = [h for h in hits if h.kind == "correction" and any(u.index < h.index <= u.index + WINDOW for u in uses)]
-        excerpts += sessions.excerpts(turns, mine[-1:])
+        for ex in sessions.excerpts(turns, mine[-1:]):
+            # what the user and the agent said only: tool output (files, pages, command output) could
+            # carry text written to steer a skill patch that later reaches every agent
+            excerpts.append({**ex, "turns": [t for t in ex["turns"] if t["role"] in ("user", "assistant")]})
     for n, ex in enumerate(excerpts, 1):
         ex["id"] = n
     return {"skill": name, "text": md.read_text(), "corrections": excerpts}
@@ -308,19 +312,28 @@ def tool_run(aos, label: str, protocol: str, prompt: str, serve_args: list[str])
 
 def improve(aos, name: str) -> str:
     """One short improver run for a flagged skill. Returns "proposed <id>", "no change" or "failed: …"."""
+    if not improver_input(aos, name)["corrections"]:
+        _log_outcome(aos.data, name, "no change", "no corrections to learn from")
+        return "no change: no corrections to learn from (their sessions were pruned)"
     before = {r["proposal"] for r in _proposals(aos.data)}
     problem = tool_run(aos, f"improve-{name}", "## Skill improver protocol\n\n" + IMPROVER_PROTOCOL,
                        f"Improve the skill {name}. Follow the skill improver protocol.", ["--improve-skill", name])
-    new = [r["proposal"] for r in _proposals(aos.data) if r["proposal"] not in before]
+    new = [r["proposal"] for r in _proposals(aos.data) if r.get("skill") == name and r["proposal"]
+           and r["proposal"] not in before]
     if new:
         return f"proposed {new[0]}"
     if problem and problem.startswith("deferred"):
         return problem
     if problem:
-        _log_proposal(aos.data, {"skill": name, "proposal": None, "status": "failed", "reason": problem[:300],
-                                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+        _log_outcome(aos.data, name, "failed", problem)
         return f"failed: {problem}"
+    _log_outcome(aos.data, name, "no change", "")  # starts the cooldown like a proposal
     return "no change"
+
+
+def _log_outcome(data, name: str, status: str, reason: str) -> None:
+    _log_proposal(data, {"skill": name, "proposal": None, "status": status, "reason": reason[:300],
+                         "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
 
 
 def improve_flagged(aos, limit: int = 2) -> list[str]:
@@ -328,9 +341,16 @@ def improve_flagged(aos, limit: int = 2) -> list[str]:
     for name in flagged(aos.data, aos.settings, aos.repo):
         if len(out) >= limit:
             break
-        if eligible(aos, name):
+        lock = Path(aos.data) / "skills" / f"improve-{name}.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock, "w") as fh:
             try:
-                out.append(improve(aos, name))
-            except Exception as e:  # a background job: report, never crash
-                out.append(f"failed: {type(e).__name__}: {e}")
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                continue  # another job is improving this skill right now
+            if eligible(aos, name):
+                try:
+                    out.append(improve(aos, name))
+                except Exception as e:  # a background job: report, never crash
+                    out.append(f"failed: {type(e).__name__}: {e}")
     return out

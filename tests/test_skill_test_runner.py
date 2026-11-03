@@ -61,7 +61,7 @@ def test_run_scenario_passes_and_writes_the_report_and_results(env):
     assert "--resume" not in first["argv"] and second["argv"][second["argv"].index("--resume") + 1] == "sess-1"
     assert {"stream-json", "--verbose", "acceptEdits"} <= set(first["argv"])
     assert first["argv"][first["argv"].index("--allowedTools") + 1] == "mcp__aos"   # aos tools not refused
-    assert Path(first["cwd"]).name == "api" and first["AOS_DRY_DISPATCH"] == "1"
+    assert Path(first["cwd"]).name == "api" and first["AOS_DRY_DISPATCH"] == "1" == first["AOS_SKILL_TEST"]
 
 
 def test_failed_check_fails_the_run_with_its_reason(env):

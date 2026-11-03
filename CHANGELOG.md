@@ -14,6 +14,7 @@ Releases before 0.7.0 were numbered after the fact, one per merged pull request,
 - **Skill compliance tests.** Scenario files in `skills/<name>/tests/*.yaml` with fixed checks (`calls` with `at_least`/`at_most`/`distinct`/`where`, `before`, `never`).
   - `aos skills test [skill] [scenario] [--keep]` runs them with `claude -p --output-format stream-json` in a throwaway aos home and throwaway projects; reports go to `<data>/skills/tests/`.
   - `AOS_DRY_DISPATCH=1` (set by the runner) makes `board_start` and `aos board run` record "would start the dispatcher" without launching workers.
+  - The runner also sets `AOS_SKILL_TEST=1`. Skill writes are staged in the throwaway inbox instead of written to `skills/`, and the demo sessions aren't captured, so no learner runs start. The test agent may call the aos tools (`--allowedTools mcp__aos`).
   - `--draft` has a cheap AI run write `draft-<name>.yaml` (validated; drafts never run until renamed). `--validate` checks every file at no cost; CI runs it.
   - First tests: `aos-feature/tests/plan-two-projects.yaml` and `asks-before-creating.yaml`.
 

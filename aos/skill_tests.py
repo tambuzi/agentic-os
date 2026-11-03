@@ -65,15 +65,15 @@ def _check(path, c) -> dict:
     kinds = [k for k in c if k in CHECK_KEYS]
     unknown = [k for k in c if k not in CHECK_KEYS and not any(k in CHECK_KEYS[x] for x in kinds)]
     if unknown or len(kinds) != 1:
-        raise _bad(path, f"unknown check {', '.join(unknown) or c!r}: use calls, before or never")
+        raise _bad(path, f"unknown check {', '.join(map(str, unknown)) or c!r}: use calls, before or never")
     kind = kinds[0]
     extra = set(c) - {kind} - CHECK_KEYS[kind]
     if extra:
-        raise _bad(path, f"{kind} does not take {', '.join(sorted(extra))}")
+        raise _bad(path, f"{kind} does not take {', '.join(sorted(map(str, extra)))}")
     if kind == "before":
         if not (_strs(c["before"]) and len(c["before"]) == 2):
             raise _bad(path, "before needs two tool names: [a, b]")
-        return c
+        return {**c, "before": [_strip(x) for x in c["before"]]}
     if not (isinstance(c[kind], str) and c[kind].strip()):
         raise _bad(path, f"{kind} needs a tool name")
     for k in ("at_least", "at_most"):
@@ -83,7 +83,7 @@ def _check(path, c) -> dict:
         raise _bad(path, "distinct needs an argument name")
     if "where" in c and not isinstance(c["where"], dict):
         raise _bad(path, "where must be a mapping of argument: value")
-    return c
+    return {**c, kind: _strip(c[kind])}  # mcp__aos__task_create in a check matches task_create
 
 
 def load(path) -> Scenario:
@@ -92,6 +92,8 @@ def load(path) -> Scenario:
         doc = yaml.safe_load(path.read_text())
     except yaml.YAMLError as e:
         raise _bad(path, f"not valid yaml: {e}") from None
+    except (OSError, UnicodeDecodeError) as e:
+        raise _bad(path, f"can't read it: {e}") from None
     if not isinstance(doc, dict):
         raise _bad(path, "a test file is a mapping with scenario, turns and checks")
     for k in ("scenario", "turns", "checks"):
@@ -129,6 +131,8 @@ def discover(repo, skill: str | None = None, include_drafts: bool = False) -> tu
             ok.append(load(p))
         except TestFileError as e:
             errors.append(e.message)
+        except Exception as e:  # a file we didn't foresee: report it, keep the others
+            errors.append(f"{p}: {type(e).__name__}: {e}")
     return ok, errors
 
 
@@ -246,7 +250,9 @@ def run_scenario(aos, scenario: Scenario, claude_cmd: list[str] | None = None, k
     start = time.monotonic()
     tmp = Path(tempfile.mkdtemp(prefix="aos-skilltest-", dir=Path.home()))
     env = {k: v for k, v in os.environ.items() if k != "AOS_REPO"}
-    env.update(AOS_HOME=str(tmp / "home"), AOS_DRY_DISPATCH="1")
+    # AOS_SKILL_TEST: skill writes are staged in the throwaway inbox, and the demo sessions are not
+    # captured (no learner runs outliving the throwaway home)
+    env.update(AOS_HOME=str(tmp / "home"), AOS_DRY_DISPATCH="1", AOS_SKILL_TEST="1")
     folders: list[str] = []
     try:
         projects = _setup(aos, scenario, tmp, env)
